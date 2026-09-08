@@ -768,11 +768,75 @@ allowed to break.
 
 | Alpha gate | v0.2 result |
 |---|---|
-| `tools/loop.mjs` — determinism | **PASS** — identical procedural setup, identical execution trace, identical final stream states |
+| `tools/loop.mjs` — determinism | **PASS** — `SAME PROCEDURAL SETUP: true · SAME EXECUTION TRACE: true · STREAM STATES EQUAL: true`, unchanged by the sector-lifecycle refactor |
+| `tools/continuity.mjs` — no loading break at a transition | **PASS** — one world build per run; the volume crossing at z 1602 cost **223.3ms against a 231.1ms median and a 265.1ms p95**, i.e. a crossing is cheaper than a typical frame. (Software rasteriser, so the absolute figures are a floor; the *relationship* is the gate) |
 | `tools/arena.mjs` — a 5-hostile ARENA is losable | **PASS** — naive pilot (hold fire, walk forward) dies at 120s with 3 hostiles standing; fully passive pilot dies at 60s. `tokenSource` observed at both thresholds: `227.6° <= 235° -> 1` and `244.4° > 235° -> 2` |
 | `tools/pilot.mjs` — every state is winnable | **PASS** — ARENA 8620 · DUEL 9000 · STORM 9000 · HUNT 8520 · PURSUIT 9000 · SEVERANCE 9000, all cleared |
 | `tools/full.mjs` — whole loop end to end | **PASS** — title → HUNT → vanish → rally win, escalation and loss → FORGE → LAUNCH → **GRAVEMARK** (the seed picked it) → phase 2 with the screen broken (1 of 4 relays screening, 974 refused vs 900 taken) → results. Console clean |
 | `tools/forge2.mjs` — FORGE 1 offers 4 evolutions, FORGE 2 offers 3 | **PASS** — classifier coverage unchanged across the pool |
 | `tools/content.mjs` — every reactor, upgrade and evolution measured | **PASS** — all 18 rows match their GDD values, including the ones the corrupted variants now scale |
 | `tools/settings.mjs` — §3.6 | **PASS** — 10 assist rows, 11 rebindable actions, persistence across reload, and the assist snapshot reaching `RunState` |
+
+---
+
+## 20. Checkpoint C — the ladder, measured
+
+`RUNS=50 CAP=110 node tools/ladder.mjs` — 500 runs, one byte-identical fallible pilot, five
+outcome metrics per tier. The gate: **monotonic clear-rate decline**, and every adjacent pair
+must differ on **at least two** of clear rate (±2%), mean arc (±1°), mean tokens (±0.005), vanish
+opportunities per minute (±0.4) and mean structure remaining (±120).
+
+### First authoritative run — FAILED, and why that mattered
+
+| TIER | CLEAR | MEAN ARC | MEAN TOKENS | PV OPP/MIN | STRUCTURE LEFT |
+|---|---|---|---|---|---|
+| I | 100% | 80.2° | 1.011 | 25.9 | 8328 |
+| II | 100% | 81.6° | 1.010 | 26.3 | 8384 |
+| III | 100% | 81.5° | 1.008 | 26.5 | 8405 |
+| IV | 100% | 83.9° | 1.013 | 26.5 | 8530 |
+| V | 100% | 100.0° | 1.029 | 28.8 | 8042 |
+| VI | 90% | 114.5° | 1.051 | 30.4 | 7628 |
+| VII | 90% | 111.7° | 1.056 | 30.3 | 7742 |
+| VIII | 64% | 99.7° | 1.062 | 24.6 | 7718 |
+| IX | 50% | 100.3° | 1.061 | 24.5 | 7669 |
+| X | 26% | 107.7° | 1.088 | 24.8 | 7558 |
+
+```
+MONOTONIC CLEAR-RATE DECLINE : PASS
+ALL ADJACENT PAIRS SEPARATED : FAIL (5/9)
+  I → II      FAIL  [meanArc]
+  II → III    FAIL  []
+  VI → VII    FAIL  [meanArc]
+  VIII → IX   FAIL  [clearRate]
+```
+
+**`II → III` differed on nothing at all.** Under non-negotiable 9 those are not two tiers, and
+the correct response is to retune, not to describe them as distinct.
+
+### The root cause the failure exposed
+
+`forwardBias` is a **spiral-in ratio applied to a normalised steering vector**:
+
+```ts
+wish.set(-d.z, 0, d.x).multiplyScalar(strafeDir);   // orbit, magnitude 1
+wish.addScaledVector(d, director.forwardBias);      // pull toward the pilot
+wish.normalize();                                   // ← speed is unchanged
+```
+
+At 0.18 that turns a hostile about **10°** off its orbit; at 0.26, about **15°**. It is invisible
+in the encirclement arc until roughly 0.35 — which the table proves at both ends: bias
+**0.18 → 0.26 moved the mean arc 81.6° → 81.5°** (nothing), while **0.36 → 0.48 moved it
+100.0° → 114.5°**. Tiers I–III were separating on a lever that does nothing where they used it.
+
+The second thing the table shows is that mean arc *falls* at VIII–X. That is not a bug: at those
+tiers the pilot dies, runs are shorter, and the average is dominated by the opening of a fight
+before the formation has wrapped. Arc is therefore a good separator in the middle of the ladder
+and a poor one at the top, where clear rate and structure do the work.
+
+### The retune
+
+The staircase was rebuilt on the levers that are **monotone across their whole range** —
+composition ceiling, reinforcement pacing and wave count, which move structure-remaining and
+vanish opportunities at every tier — with forward bias and spawn spread widening the arc from
+the middle of the ladder upward, where they actually bite.
 
