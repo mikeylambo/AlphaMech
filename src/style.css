@@ -152,6 +152,57 @@ canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block
 }
 #objective b { display: block; color: var(--bone); font-size: 15px; letter-spacing: 5.6px; }
 
+/* ---------------------------------------------------------------------------------------------
+   OBJECTIVE emplacement readout.
+   Only present while an OBJECTIVE configuration has raised a point, so its presence on screen is
+   itself information: if the panel is there, something can be lost that is not you.
+   --------------------------------------------------------------------------------------------- */
+#objpoint {
+  position: absolute; left: 50%; top: calc(var(--hud-pad) + 128px); transform: translateX(-50%);
+  width: min(320px, 32vw); text-align: center; opacity: 0; pointer-events: none;
+  transition: opacity var(--tr);
+}
+#objpoint.on { opacity: 1; }
+#objpoint .k { font-size: 10px; letter-spacing: 4px; color: var(--cyan); }
+#objpoint .v { font-size: 17px; letter-spacing: 3px; color: var(--bone); margin-top: 2px; }
+#objpoint .bar { position: relative; height: 6px; background: rgba(255,255,255,.09); margin-top: 5px; overflow: hidden; }
+#objpoint .bar > i {
+  position: absolute; inset: 0; transform-origin: left;
+  background: linear-gradient(90deg, var(--cyan-dim), var(--cyan));
+  transition: transform var(--tr-fast);
+}
+#objpoint .t { font-size: 10px; letter-spacing: 3px; color: var(--dust); margin-top: 4px; }
+#objpoint.threatened .k, #objpoint.threatened .t { color: var(--bad); }
+#objpoint.threatened .bar > i { background: linear-gradient(90deg, #a33, var(--bad)); }
+
+/* ---------------------------------------------------------------------------------------------
+   COMMS.
+   Combat is movement; story is stillness. A comm line is only ever raised at a FORGE, a boss
+   introduction or a sector boundary, so it may sit low and centre without ever competing with a
+   ground telegraph. Two lines maximum, by construction: the third is clipped.
+   --------------------------------------------------------------------------------------------- */
+#comm {
+  position: absolute; left: 50%; bottom: 116px; transform: translate(-50%, 10px);
+  width: min(720px, 66vw); padding: 12px 18px 13px;
+  background: linear-gradient(180deg, rgba(10,8,7,.0), rgba(10,8,7,.72) 26%, rgba(10,8,7,.78));
+  border-left: 2px solid var(--cyan); opacity: 0; pointer-events: none;
+  transition: opacity var(--tr), transform var(--tr);
+}
+#comm.on { opacity: 1; transform: translate(-50%, 0); }
+#comm .from { font-size: 10px; letter-spacing: 5px; color: var(--cyan); margin-bottom: 5px; }
+#comm .body p {
+  margin: 0 0 3px; font-size: 15px; line-height: 1.42; color: var(--bone); letter-spacing: .4px;
+}
+#comm .body p:nth-child(n+3) { display: none; }
+
+/* The same block inside the FORGE, where it belongs by design rather than by exception. */
+.comm.forge {
+  margin: 4px 0 18px; padding: 11px 16px;
+  background: rgba(143,244,255,.05); border-left: 2px solid var(--cyan);
+}
+.comm.forge .from { font-size: 10px; letter-spacing: 5px; color: var(--cyan); margin-bottom: 5px; }
+.comm.forge .body p { margin: 0 0 3px; font-size: 15px; line-height: 1.42; color: var(--bone); }
+
 /* --- lock reticle --- */
 #reticle {
   position: absolute; width: 46px; height: 46px; margin: -23px 0 0 -23px; opacity: 0;

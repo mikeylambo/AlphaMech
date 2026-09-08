@@ -13,7 +13,7 @@ export class AudioManager {
   private bus!: GainNode; private busFilt!: BiquadFilterNode; private busShimmer!: BiquadFilterNode;
   private timeScale = 1; private musicDucked = false;
   private lastRifle = 0;
-  music!: GainNode; private musicOsc: { o: OscillatorNode; g: GainNode }[] = []; private padGain!: GainNode; private pulseGain!: GainNode; private bassGain!: GainNode; private nextBeat = 0; private beat = 0; private intensity = 0; private musicStarted = false; private wind!: GainNode; private windFilt!: BiquadFilterNode; private ambT = 0; private chordIdx = 0;
+  music!: GainNode; private droneFilt: BiquadFilterNode | null = null; private revGain: GainNode | null = null; private musicOsc: { o: OscillatorNode; g: GainNode }[] = []; private padGain!: GainNode; private pulseGain!: GainNode; private bassGain!: GainNode; private nextBeat = 0; private beat = 0; private intensity = 0; private musicStarted = false; private wind!: GainNode; private windFilt!: BiquadFilterNode; private ambT = 0; private chordIdx = 0;
 
   start() {
     if (this.started) return; this.started = true;
@@ -41,30 +41,70 @@ export class AudioManager {
   private startMusic() {
     const c = this.ctx!; this.musicStarted = true;
     this.music = c.createGain(); this.music.gain.value = 0.5; this.music.connect(this.bus);
-    const rev = c.createConvolver(); const len = c.sampleRate * 2.2; const ir = c.createBuffer(2, len, c.sampleRate); for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6); } rev.buffer = ir; const revG = c.createGain(); revG.gain.value = 0.35; rev.connect(revG); revG.connect(this.music);
+    const rev = c.createConvolver(); const len = c.sampleRate * 2.2; const ir = c.createBuffer(2, len, c.sampleRate); for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6); } rev.buffer = ir; const revG = c.createGain(); revG.gain.value = this.palette.reverbMix; rev.connect(revG); revG.connect(this.music); this.revGain = revG;
     // drone: detuned saws through a slow lowpass
-    const droneFilt = c.createBiquadFilter(); droneFilt.type = 'lowpass'; droneFilt.frequency.value = 220; droneFilt.Q.value = 2; const droneG = c.createGain(); droneG.gain.value = 0.05; droneFilt.connect(droneG); droneG.connect(this.music); droneG.connect(rev);
-    for (const f of [55, 55.4, 110.3]) { const o = c.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(droneFilt); o.start(); this.musicOsc.push({ o, g: droneG }); }
+    const droneFilt = c.createBiquadFilter(); droneFilt.type = 'lowpass'; droneFilt.frequency.value = this.palette.droneCut; droneFilt.Q.value = 2; this.droneFilt = droneFilt; const droneG = c.createGain(); droneG.gain.value = 0.05; droneFilt.connect(droneG); droneG.connect(this.music); droneG.connect(rev);
+    for (const f of this.palette.drone) { const o = c.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(droneFilt); o.start(); this.musicOsc.push({ o, g: droneG }); }
     const lfo = c.createOscillator(); lfo.frequency.value = 0.07; const lfoG = c.createGain(); lfoG.gain.value = 120; lfo.connect(lfoG); lfoG.connect(droneFilt.frequency); lfo.start();
     // pads: three sine/triangle voices, chord changes every 8 beats
     this.padGain = c.createGain(); this.padGain.gain.value = 0.0; this.padGain.connect(this.music); this.padGain.connect(rev);
-    for (let i = 0; i < 3; i++) { const o = c.createOscillator(); o.type = i === 1 ? 'triangle' : 'sine'; o.frequency.value = 220; const g = c.createGain(); g.gain.value = 0.045; o.connect(g); g.connect(this.padGain); o.start(); this.musicOsc.push({ o, g }); }
+    for (let i = 0; i < 3; i++) { const o = c.createOscillator(); o.type = i === 1 ? 'triangle' : this.palette.padType; o.frequency.value = this.palette.root * 2; const g = c.createGain(); g.gain.value = 0.045; o.connect(g); g.connect(this.padGain); o.start(); this.musicOsc.push({ o, g }); }
     this.pulseGain = c.createGain(); this.pulseGain.gain.value = 0; this.pulseGain.connect(this.music);
     this.bassGain = c.createGain(); this.bassGain.gain.value = 0; this.bassGain.connect(this.music);
     this.nextBeat = c.currentTime + 0.5;
   }
-  private static CHORDS = [[0, 3, 7], [-2, 2, 5], [3, 7, 10], [-4, 0, 3]]; // minor-ish progression in semitones over A
+  /**
+   * ------------------------------------------------------------------------------------------
+   * SECTOR PALETTES  (RC brief §3.6, v0.3 scope: "one sector palette of music lands here too")
+   *
+   * The score is reactive by construction rather than by cue list: percussion drops at the FORGE
+   * because the FORGE is stillness, the bus already filters under bullet time, and intensity
+   * tracks encounter state. A sector palette therefore is not a different track — it is a
+   * different set of the parameters the same generative score is already running on.
+   *
+   * S1 EXTERIOR   — A minor, wide detuned saws, open reverb, 108 bpm. Air and distance.
+   * S2 MANUFACTURE — down a fourth to E, a narrower and more dissonant chord set, a shorter and
+   *                  harder room, metallic hats and a slower pulse. Machinery, not weather.
+   *
+   * Nothing here is gated behind progression. Non-negotiable: the full adaptive score is audible
+   * from the first run; meta unlocks alternate mixes, never the score itself.
+   * ------------------------------------------------------------------------------------------
+   */
+  static readonly PALETTES = [
+    null,
+    {
+      id: 1, name: 'EXTERIOR',
+      root: 110, bpm: 108, bossBpm: 132,
+      chords: [[0, 3, 7], [-2, 2, 5], [3, 7, 10], [-4, 0, 3]],
+      drone: [55, 55.4, 110.3], droneCut: 220, reverb: 2.2, reverbMix: 0.35,
+      hatCut: 6000, bassType: 'square' as OscillatorType, padType: 'sine' as OscillatorType,
+      windCut: 380,
+    },
+    {
+      id: 2, name: 'MANUFACTURE',
+      root: 82.4, bpm: 96, bossBpm: 124,
+      // minor-second and tritone colour: the foundry is not a comfortable room
+      chords: [[0, 3, 7], [0, 1, 8], [-2, 5, 6], [-5, 2, 7]],
+      drone: [41.2, 41.7, 82.9], droneCut: 150, reverb: 1.1, reverbMix: 0.22,
+      hatCut: 9000, bassType: 'sawtooth' as OscillatorType, padType: 'triangle' as OscillatorType,
+      windCut: 210,
+    },
+  ];
+  private palette = AudioManager.PALETTES[1]!;
+  private paletteIndex = 1;
+
   private schedBeat(t: number) {
     const c = this.ctx!; const beat = this.beat; const inten = this.intensity;
-    const semi = (n: number) => 110 * Math.pow(2, n / 12);
-    if (beat % 8 === 0) { this.chordIdx = (this.chordIdx + 1) % AudioManager.CHORDS.length; const ch = AudioManager.CHORDS[this.chordIdx]; this.musicOsc.slice(3, 6).forEach((v, i) => v.o.frequency.setTargetAtTime(semi(ch[i] + 12), t, 0.6)); }
+    const pal = this.palette;
+    const semi = (n: number) => pal.root * Math.pow(2, n / 12);
+    if (beat % 8 === 0) { this.chordIdx = (this.chordIdx + 1) % pal.chords.length; const ch = pal.chords[this.chordIdx]; this.musicOsc.slice(3, 6).forEach((v, i) => v.o.frequency.setTargetAtTime(semi(ch[i] + 12), t, 0.6)); }
     // pulse: kick on 1 and 3, noise hat on offbeats, louder with intensity
     if (inten > 0.2) {
       if (beat % 2 === 0) { const o = c.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.14); const g = c.createGain(); g.gain.setValueAtTime(0.5 * inten, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.28); o.connect(g); g.connect(this.pulseGain); o.start(t); o.stop(t + 0.3); }
-      if (beat % 2 === 1 || inten > 0.7) { const n = c.createBufferSource(); n.buffer = this.noiseBuf; const f = c.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 6000; const g = c.createGain(); g.gain.setValueAtTime(0.09 * inten, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.07); n.connect(f); f.connect(g); g.connect(this.pulseGain); n.start(t); n.stop(t + 0.08); }
+      if (beat % 2 === 1 || inten > 0.7) { const n = c.createBufferSource(); n.buffer = this.noiseBuf; const f = c.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = pal.hatCut; const g = c.createGain(); g.gain.setValueAtTime(0.09 * inten, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.07); n.connect(f); f.connect(g); g.connect(this.pulseGain); n.start(t); n.stop(t + 0.08); }
       // bass arpeggio on the chord root, 16ths when intense
-      const ch = AudioManager.CHORDS[this.chordIdx]; const note = ch[(beat >> 1) % 3] - 12;
-      const o = c.createOscillator(); o.type = 'square'; o.frequency.value = semi(note); const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(600 + inten * 900, t); f.frequency.exponentialRampToValueAtTime(120, t + 0.22); const g = c.createGain(); g.gain.setValueAtTime(0.16 * inten, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.24); o.connect(f); f.connect(g); g.connect(this.bassGain); o.start(t); o.stop(t + 0.26);
+      const ch = pal.chords[this.chordIdx]; const note = ch[(beat >> 1) % 3] - 12;
+      const o = c.createOscillator(); o.type = pal.bassType; o.frequency.value = semi(note); const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(600 + inten * 900, t); f.frequency.exponentialRampToValueAtTime(120, t + 0.22); const g = c.createGain(); g.gain.setValueAtTime(0.16 * inten, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.24); o.connect(f); f.connect(g); g.connect(this.bassGain); o.start(t); o.stop(t + 0.26);
     }
     this.beat++;
   }
@@ -73,7 +113,7 @@ export class AudioManager {
     if (!this.ctx || !this.musicStarted) return; const c = this.ctx; const t = c.currentTime;
     const target = boss ? 1 : nearby > 0 ? Math.min(0.85, 0.45 + nearby * 0.12) : 0;
     this.intensity += (target - this.intensity) * Math.min(1, dt * (target > this.intensity ? 1.2 : 0.25));
-    const bpm = boss ? 132 : 108; const beatLen = 60 / bpm / 2;
+    const bpm = boss ? this.palette.bossBpm : this.palette.bpm; const beatLen = 60 / bpm / 2;
     while (this.nextBeat < t + 0.15) { this.schedBeat(this.nextBeat); this.nextBeat += beatLen; }
     if (this.nextBeat < t) this.nextBeat = t + 0.05;
     if (!this.musicDucked) {
@@ -83,8 +123,33 @@ export class AudioManager {
     // ambient one-shots: distant rumbles and metallic clanks
     this.ambT -= dt;
     if (this.ambT <= 0) { this.ambT = 3 + Math.random() * 7; if (Math.random() < 0.6) this.noise(2.5, 'lowpass', 90, 40, 0.5, 0.12, 0.4, 'lin'); else this.tone('triangle', 700 + Math.random() * 900, 200, 0.5, 0.05, 0.005); }
-    this.windFilt.frequency.setTargetAtTime(380 + Math.sin(t * 0.21) * 160, t, 0.5);
+    this.windFilt.frequency.setTargetAtTime(this.palette.windCut + Math.sin(t * 0.21) * 160, t, 0.5);
   }
+  /**
+   * Cross the score into a sector's palette. Called at a sector boundary and at the title.
+   *
+   * The oscillators are never rebuilt — the drone voices are retuned and the filters are moved,
+   * so a boundary is a modulation rather than a cut. That is also why this is safe to call every
+   * frame: it is a no-op once the palette matches.
+   */
+  setSectorPalette(index: number) {
+    const pal = AudioManager.PALETTES[Math.min(AudioManager.PALETTES.length - 1, Math.max(1, index))];
+    if (!pal || pal === this.palette) return;
+    this.palette = pal;
+    this.paletteIndex = pal.id;
+    if (!this.ctx || !this.musicStarted) return;
+    const t = this.ctx.currentTime;
+    // the three drone voices are musicOsc[0..2]; the three pad voices are [3..5]
+    this.musicOsc.slice(0, 3).forEach((v, i) => v.o.frequency.setTargetAtTime(pal.drone[i] ?? pal.drone[0], t, 1.4));
+    this.musicOsc.slice(3, 6).forEach((v) => { v.o.type = pal.padType; });
+    this.droneFilt?.frequency.setTargetAtTime(pal.droneCut, t, 1.6);
+    this.windFilt?.frequency.setTargetAtTime(pal.windCut, t, 1.6);
+    this.revGain?.gain.setTargetAtTime(pal.reverbMix, t, 1.2);
+  }
+
+  get sectorPalette() { return this.paletteIndex; }
+  get sectorPaletteName() { return this.palette.name; }
+
   resume() { this.ctx?.resume(); }
   /** thrust 0..1, ab 0..1, hover 0..1, speed01 */
   setEngine(thrust: number, ab: number, hover: number, speed01: number) {

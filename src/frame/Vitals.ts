@@ -51,8 +51,11 @@ export class Vitals {
   /**
    * Apply damage and impact. Damage is amplified while staggered; impact is amplified while
    * Exposed and is not accumulated while already staggered (a staggered target cannot re-stagger).
+   *
+   * `exposedMult` is a parameter rather than a constant because PUNISH DOCTRINE trades it away
+   * for duration (2.4x -> 1.8x, 1.5s -> 3.0s). The caller owns the build; Vitals does not.
    */
-  hit(damage: number, impact: number, now = 0): HitResult {
+  hit(damage: number, impact: number, now = 0, exposedMult = T.exposedMult): HitResult {
     if (!this.alive) return 0;
     const vulnerable = this.staggered;
     const dealt = damage * (vulnerable ? T.staggerDmgMult : 1);
@@ -60,7 +63,7 @@ export class Vitals {
     this.damageTaken += Math.min(dealt, this.structure + dealt);
     this.holdT = T.impactHoldAfterHit;
     if (!vulnerable && impact > 0) {
-      this.impact += impact * (this.exposed > 0 ? T.exposedMult : 1);
+      this.impact += impact * (this.exposed > 0 ? exposedMult : 1);
       if (this.impact >= this.impactMax) {
         this.impact = 0;
         this.stagger = this.staggerDur;
@@ -73,9 +76,9 @@ export class Vitals {
   }
 
   /** Impact-only application, used by upgrades that spread stagger pressure (Cascade Break). */
-  addImpact(impact: number, now = 0): HitResult {
+  addImpact(impact: number, now = 0, exposedMult = T.exposedMult): HitResult {
     if (!this.alive || this.staggered) return 0;
-    this.impact += impact * (this.exposed > 0 ? T.exposedMult : 1);
+    this.impact += impact * (this.exposed > 0 ? exposedMult : 1);
     if (this.impact >= this.impactMax) {
       this.impact = 0; this.stagger = this.staggerDur; this.staggersTaken++; this.lastStaggerAt = now;
       return 2;

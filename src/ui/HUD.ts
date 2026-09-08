@@ -9,9 +9,8 @@ import { Rally } from '../frame/Rally';
 import { EncounterId, ENCOUNTERS } from '../director/Encounters';
 import { HARDPOINT_ORDER, HARDPOINTS, EVOLUTIONS, EvolutionId, HardpointId } from '../build/Weapons';
 import { RunState } from '../build/RunState';
-import { Severance } from '../enemies/Severance';
 import type { Beat } from '../director/Onboarding';
-import { Gravemark } from '../enemies/Gravemark';
+import type { BossFrame } from '../enemies/Boss';
 
 /**
  * The instrument panel. Its whole job is Law II: make the shape of the formation around you
@@ -38,6 +37,8 @@ export class HUD {
         <div class="prog" id="bProg"></div>
       </div>
       <div id="objective"><b id="objMain">—</b><span id="objSub"></span></div>
+      <div id="objpoint"><div class="k mono">EMPLACEMENT</div><div class="v mono">100%</div><div class="bar"><i></i></div><div class="t mono">CLEAR</div></div>
+      <div id="comm"><div class="from mono">CONTROL</div><div class="body"></div></div>
       <div id="bossbar">
         <div class="n"><span>SEVERANCE</span><span class="ph mono" id="bossPhase">PHASE 1</span></div>
         <div class="track"><i id="bossFill"></i><div class="mid"></div></div>
@@ -90,7 +91,7 @@ export class HUD {
     `;
     parent.appendChild(this.root);
 
-    for (const id of ['tutorial', 'tutPrompt', 'tutHint', 'bChain', 'bState', 'bStress', 'bProg', 'objMain', 'objSub', 'vStruct', 'vStructFill', 'vStructGhost', 'vImpact', 'vImpactFill', 'vEnergy', 'vEnergyFill', 'enSegs', 'sState', 'sStreak', 'targets', 'arcLine', 'tokenLine', 'reticle', 'flash', 'slowfx', 'hitfx', 'rally', 'rallyKey', 'rallyArc', 'rallyMode', 'rallyCount', 'rallyPips', 'bossbar', 'bossFill', 'bossPhase', 'bossCV', 'transit', 'trK', 'trT', 'trS', 'toasts', 'padHint', 'hardpoints'])
+    for (const id of ['tutorial', 'tutPrompt', 'tutHint', 'bChain', 'bState', 'bStress', 'bProg', 'objMain', 'objSub', 'vStruct', 'vStructFill', 'vStructGhost', 'vImpact', 'vImpactFill', 'vEnergy', 'vEnergyFill', 'enSegs', 'sState', 'sStreak', 'targets', 'arcLine', 'tokenLine', 'reticle', 'flash', 'slowfx', 'hitfx', 'rally', 'rallyKey', 'rallyArc', 'rallyMode', 'rallyCount', 'rallyPips', 'bossbar', 'bossFill', 'bossPhase', 'bossCV', 'transit', 'trK', 'trT', 'trS', 'toasts', 'padHint', 'hardpoints', 'objpoint', 'comm'])
       this.els[id] = $(id);
 
     this.radar = $('radar') as HTMLCanvasElement;
@@ -130,8 +131,8 @@ export class HUD {
   }
 
   /** The boss is not an encounter state; it gets its own banner. */
-  setBossBanner(name: string, stress: string, objective: string) {
-    this.els.bChain.textContent = 'SECTOR 01 · BOSS';
+  setBossBanner(name: string, stress: string, objective: string, sector = 1) {
+    this.els.bChain.textContent = `SECTOR ${String(sector).padStart(2, '0')} · BOSS`;
     this.els.bState.textContent = name;
     this.els.bStress.textContent = stress;
     this.els.objMain.textContent = objective;
@@ -172,28 +173,61 @@ export class HUD {
 
   damageFlash() { this.hitT = 1; }
 
-  setBoss(boss: Severance | Gravemark | null) {
+  /**
+   * One boss bar for every boss in the game.
+   *
+   * There is no `instanceof` here and there must never be one: each boss answers what it is
+   * called, how much of its pool is left, whether its damage gate is currently closed, and one
+   * line about the mechanic the fight is actually about. Adding the fifth boss is adding a class
+   * that answers those four questions.
+   */
+  setBoss(boss: BossFrame | null) {
     this.els.bossbar.classList.toggle('on', !!boss);
-    this.els.bossbar.classList.toggle('screened', boss instanceof Gravemark && boss.screened);
+    this.els.bossbar.classList.toggle('screened', !!boss?.gated);
     if (!boss) return;
     setBar(this.els.bossFill, boss.structure01);
     this.els.bossPhase.textContent = `PHASE ${boss.phase}`;
     const name = this.els.bossbar.querySelector('.n span') as HTMLElement | null;
-    if (name) name.textContent = boss instanceof Gravemark ? 'GRAVEMARK' : 'SEVERANCE';
-    if (boss instanceof Gravemark) {
-      // the readout the fight is actually about: how much of the screen is still in the rear arc
-      const pips = Array.from({ length: Gravemark.MAX_RELAYS }, (_, i) => (i < boss.screening ? '■' : i < boss.liveRelays.length ? '□' : '·')).join(' ');
-      this.els.bossCV.textContent = boss.screened
-        ? `SCREENED — ${pips}  ${boss.screening}/${Gravemark.SCREEN_THRESHOLD} RELAYS IN REAR ARC · ROTATE THE FORMATION`
-        : `EXPOSED — ${pips}  ${boss.screening}/${Gravemark.SCREEN_THRESHOLD} IN REAR ARC · HIT IT NOW`;
-    } else {
-      const next = boss.phase === 1 ? `COUNTER-VANISH ON VANISH ${(Math.floor(boss.vanishesTaken / T.counterVanishP1Every) + 1) * T.counterVanishP1Every}` : `COUNTER-VANISH ${(T.counterVanishP2Chance * 100) | 0}% · CD ${T.counterVanishP2Cooldown.toFixed(1)}s`;
-      this.els.bossCV.textContent = `VANISHES ${boss.vanishesTaken} · COUNTERS ${boss.counterVanishes} · ${next}`;
-    }
+    if (name) name.textContent = boss.bossName;
+    this.els.bossCV.textContent = boss.hudLine();
   }
+
+  /**
+   * OBJECTIVE state readout. Nothing is shown when the encounter has no point to protect, so
+   * the panel is proof of the state rather than permanent chrome.
+   */
+  setObjectivePoint(p: { kind: string; structure01: number; threats: number; label: string } | null) {
+    const el = this.els.objpoint;
+    el.classList.toggle('on', !!p);
+    if (!p) return;
+    el.classList.toggle('threatened', p.threats > 0);
+    (el.querySelector('.k') as HTMLElement).textContent = p.label;
+    (el.querySelector('.v') as HTMLElement).textContent = `${Math.round(p.structure01 * 100)}%`;
+    (el.querySelector('.t') as HTMLElement).textContent = p.threats > 0 ? `${p.threats} ON THE POINT` : 'CLEAR';
+    setBar(el.querySelector('.bar > i') as HTMLElement, p.structure01);
+  }
+
+  /**
+   * A comm line. Two lines maximum, and only ever issued at a FORGE, a boss introduction or a
+   * sector boundary — combat is movement, story is stillness.
+   */
+  comm(from: string, lines: string[], hold = 6.5) {
+    const el = this.els.comm;
+    (el.querySelector('.from') as HTMLElement).textContent = from;
+    const body = el.querySelector('.body') as HTMLElement;
+    body.innerHTML = '';
+    for (const l of lines.slice(0, 2)) body.appendChild(h('p', '', l));
+    el.classList.remove('on');
+    void el.offsetWidth;   // restart the animation even if a line is already up
+    el.classList.add('on');
+    this.commT = hold;
+  }
+  clearComm() { this.els.comm.classList.remove('on'); this.commT = 0; }
+  private commT = 0;
 
   // ---------------------------------------------------------------------------- per frame
   update(realDt: number, p: Player, hostiles: Hostile[], director: Director, rally: Rally, camera: THREE.PerspectiveCamera, timeScale: number, padActive: boolean) {
+    if (this.commT > 0) { this.commT -= realDt; if (this.commT <= 0) this.els.comm.classList.remove('on'); }
     const V = p.vitals;
     this.els.vStruct.textContent = `${Math.round(V.structure)} / ${Math.round(V.structureMax)}`;
     setBar(this.els.vStructFill, V.structure01);

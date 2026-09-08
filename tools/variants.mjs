@@ -27,29 +27,31 @@ const law = await page.evaluate(() => {
 console.log('  all distinct:', law.every(l => l.distinct), '|', [...new Set(law.map(l => `${l.a}/${l.b}`))].join('  '));
 
 // walk every variant: raise it, run it, confirm the field and objective wire up
-console.log('\nWALKING ALL 24:');
+console.log('\nWALKING EVERY CONFIGURATION:');
 const results = await page.evaluate(() => {
   const g = window.__game;
   g.renderEnabled = false; g.uiEnabled = false;
   const out = [];
+  // Every state has an earliest sector it exists in (ENCOUNTERS[].fromSector). OBJECTIVE arrives
+  // with Sector 2, so reaching its four configurations means descending to Sector 2 first — a
+  // walk that only ever looked in Sector 1 would report them unreachable rather than unbuilt.
+  const depth = window.__dev.stateDepths();
   for (const v of window.__dev.variants()) {
-    // a run plays two chains, so not every seed contains every state: search for one that does
+    const needSector = depth[v.state] ?? 1;
     let staged = false;
     for (let attempt = 0; attempt < 120 && !staged; attempt++) {
       g.startRun('VAR-' + v.id + '-' + attempt, 'vector', 6);
-      if (!window.__dev.stops().some((s) => s.label === v.state)) continue;
-      const r = window.__dev.forceVariant(v.id);
+      if (needSector > 1) window.__dev.gotoSector(needSector);
+      if (!window.__dev.stops().some((s) => s.label === v.state && s.sector === g.run.sector)) continue;
+      const r = window.__dev.stageVariant(v.id);
       staged = typeof r !== 'string';
     }
-    if (!staged) { out.push({ id: v.id, ok: false, why: 'no seed produced state ' + v.state }); continue; }
-    window.__dev.skipToLabel(v.state);
-    // the forced variant is applied on entry
-    const stop = g.__proto__ ? null : null; void stop;
+    if (!staged) { out.push({ id: v.id, ok: false, why: 'no seed produced state ' + v.state + ' at sector ' + needSector }); continue; }
     for (let i = 0; i < 260; i++) { g.input.scripted = { down: ['W','MOUSE1'], look: [0,0] }; g.tick(1/60); }
     g.input.scripted = null;
     const cur = window.__dev.currentVariant();
     out.push({
-      id: v.id, state: v.state, ok: !!cur && cur.id === v.id,
+      id: v.id, state: v.state, sector: needSector, ok: !!cur && cur.id === v.id,
       applied: cur?.id ?? null, geometry: cur?.geometry, objective: cur?.objective,
       fields: cur?.fields, hostiles: g.hostiles.length, transports: cur?.transports ?? 0,
       hp: Math.round(g.player.vitals.structure),

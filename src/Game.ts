@@ -21,8 +21,8 @@ import { CombatContext } from './frame/Context';
 import { Hostile, DamageSource } from './frame/Types';
 
 import { Director } from './director/Director';
-import { ENCOUNTERS, EncounterId } from './director/Encounters';
-import { selectChains } from './director/Chains';
+import { ENCOUNTERS, EncounterId, poolFor } from './director/Encounters';
+import { selectChains, RunContext, chainCensus } from './director/Chains';
 import { VariantSpec, pickVariant, VARIANTS, VARIANTS_BY_STATE } from './director/Variants';
 import { EncounterFields } from './director/EncounterFields';
 import { Transports } from './director/Transports';
@@ -30,19 +30,24 @@ import { Onboarding } from './director/Onboarding';
 
 import { Enemy, resetHostileIds } from './enemies/Enemy';
 import { prewarmRigs } from './entities/RigCache';
-import { ARCHETYPES, ARCHETYPE_PALETTES, ArchetypeId } from './enemies/Archetypes';
+import { ARCHETYPES, ARCHETYPE_PALETTES, ArchetypeId, ARCHETYPE_IDS } from './enemies/Archetypes';
 import { Severance } from './enemies/Severance';
 import { Gravemark } from './enemies/Gravemark';
+import { Chorus } from './enemies/Chorus';
+import { Kilnworks } from './enemies/Kilnworks';
+import type { BossFrame } from './enemies/Boss';
+import { ObjectivePoint, OBJECTIVE_STRUCTURE, ESCORT_SPEED } from './director/Objectives';
+import { comms, Comms } from './narrative/Comms';
 
 import { SectorWorld, Volume } from './world/ChainWorld';
-import { buildLighting, SECTOR_LOOKS, SectorLighting } from './world/Sector';
+import { buildLighting, SECTOR_LOOKS, SectorLighting, sectorLook } from './world/Sector';
 
 import { RunState } from './build/RunState';
-import { ReactorId, REACTORS } from './build/Reactors';
-import { UpgradeId } from './build/Upgrades';
+import { ReactorId, REACTORS, REACTOR_IDS } from './build/Reactors';
+import { UpgradeId, UPGRADE_IDS } from './build/Upgrades';
 import { FALL_TIERS, FallTier, fallProgress, tierFor, fallLadderProof } from './director/Fall';
 import { pickElite, ELITES } from './enemies/Elites';
-import { EvolutionId, HardpointId } from './build/Weapons';
+import { EvolutionId, HardpointId, EVOLUTION_IDS } from './build/Weapons';
 
 import { MetricsSampler, EncounterScore, aggregate } from './score/Metrics';
 import { classify } from './build/Disciplines';
@@ -52,6 +57,18 @@ import { Screens } from './ui/Screens';
 import { DebugPanel, Profiler } from './ui/Debug';
 
 type Mode = 'title' | 'run' | 'forge' | 'results' | 'pause' | 'dead' | 'tutorial';
+type BossId = 'severance' | 'gravemark' | 'chorus' | 'kilnworks';
+
+/** The two bosses each sector draws between, and their classes. */
+const BOSS_ROSTER: Record<number, [BossId, BossId]> = { 1: ['severance', 'gravemark'], 2: ['chorus', 'kilnworks'] };
+const BOSS_LABEL: Record<BossId, string> = { severance: 'SEVERANCE', gravemark: 'GRAVEMARK', chorus: 'CHORUS', kilnworks: 'KILNWORKS' };
+const BOSS_CLASS: Record<BossId, string> = { severance: 'ACE · EXECUTION', gravemark: 'FORMATION · ROTATION', chorus: 'FORMATION · ROTATION', kilnworks: 'WAR MACHINE · PILOTING' };
+const BOSS_BRIEF: Record<BossId, string> = {
+  severance: 'READ THE FRAME THAT READS YOU',
+  gravemark: 'DRIVE THE RELAYS OUT OF ITS REAR ARC',
+  chorus: 'COLLAPSE THREE BEARINGS INTO ONE SPAN',
+  kilnworks: 'SEVER THE FEED · RIDE THE LINE · KILL THE POUR',
+};
 
 interface Stop {
   kind: 'node' | 'forge' | 'boss';
@@ -66,6 +83,8 @@ interface Stop {
 }
 
 const MAX_DT = 1 / 20;
+/** How many sectors of authored content exist. v0.3 = EXTERIOR and MANUFACTURE. */
+const SECTORS_BUILT = 2;
 
 export class Game {
   // --- rendering ---
@@ -93,9 +112,14 @@ export class Game {
   // --- simulation ---
   player!: Player;
   hostiles: Enemy[] = [];
-  boss: Severance | Gravemark | null = null;
-  /** Which of Sector 1's two bosses this seed drew. */
-  private bossKind: 'severance' | 'gravemark' = 'severance';
+  boss: BossFrame | null = null;
+  /** Every frame belonging to the current boss encounter — CHORUS is three, KILNWORKS is five. */
+  private bossFrames: BossFrame[] = [];
+  /**
+   * Which of each sector's two bosses this seed drew. Both classes are represented in every
+   * sector, so the exam changes with the seed rather than only the model (RC brief §2.2).
+   */
+  private bossKind: Record<number, BossId> = { 1: 'severance', 2: 'chorus' };
   run = new RunState();
   rally = new Rally();
   metrics = new MetricsSampler();
@@ -104,6 +128,10 @@ export class Game {
   /** The configuration the current encounter is running. */
   variant: VariantSpec | null = null;
   private objectiveT = 0;
+  /** OBJECTIVE: the emplacement or the escorted asset, when the configuration raises one. */
+  private point: ObjectivePoint | null = null;
+  /** OBJECTIVE · ASSASSINATE: the one frame that actually matters. */
+  private marked: Enemy | null = null;
   onboarding!: Onboarding;
   /** Hostiles the tutorial is driving behind the player. */
   /** Tutorial-only: hostile id -> bearing off the player's nose it is being held on. */
@@ -211,7 +239,12 @@ export class Game {
 
     this.ctx = {
       scene: this.scene, fx: this.fx, audio: this.audio, director: this.director, ordnance: this.ordnance,
-      target: null as unknown as Player, hostiles: this.hostiles as Hostile[], time: 0, telegraphLead: 0,
+      target: null as unknown as Player, hostiles: this.hostiles as Hostile[], time: 0,
+      leadFor: (h) => this.player.telegraphLeadFor(h),
+      punish: { exposedMult: T.exposedMult, exposedDuration: T.exposedDur },
+      targetable: () => !this.player.untargetable,
+      hasLineOfSight: (a, b) => this.world.hasLineOfSight(a, b),
+      onHostileSplit: () => { this.hud.flash('SPLIT', '#b8ff5a'); },
       groundAt: (x, z) => this.world.groundAt(x, z),
       confine: (pos, margin) => {
         let clamped = this.world.confine(pos, margin ?? 0);
@@ -328,11 +361,22 @@ export class Game {
     this.run.begin(seed, reactor, fall);
     this.director.setFall(tierFor(fall));
     this.director.flankDebt = false;
-    // Two Sector 1 bosses; the seed draws one from the boss stream before anything else uses it.
-    this.bossKind = RNG.stream('boss').chance(0.5) ? 'gravemark' : 'severance';
+    comms.beginRun();
+    comms.countRun();
+    // Two bosses per sector; the seed draws one of each from the boss stream before anything
+    // else uses it, so the whole descent's exam list is fixed by the seed at t=0.
+    const bossRng = RNG.stream('boss');
+    this.bossKind = {};
+    for (const idx of Object.keys(BOSS_ROSTER).map(Number)) {
+      const pair = BOSS_ROSTER[idx];
+      this.bossKind[idx] = bossRng.chance(0.5) ? pair[1] : pair[0];
+    }
 
     // The current sector is built now; the NEXT one is built incrementally while this one is
     // played, and the previous one is retired. Never more than two resident (§3.4).
+    // v0.3 ships two sectors, so a run descends both by default. `setSectorPlan` still overrides
+    // it for the lifecycle proof, which chains more instances than the content has.
+    this.run.sectorPlan = Math.max(this.run.sectorPlan, SECTORS_BUILT);
     this.world.reset();
     const sector = this.world.beginSector(this.run.chains, this.run.sector, this.run.sectorPlan > 1);
     this.stops = [];
@@ -343,6 +387,21 @@ export class Game {
     this.clearHostiles();
     this.ordnance.clear();
     this.fx.clear();
+    /**
+     * The previous run's encounter field, transports and objective point are torn down HERE.
+     *
+     * They were not, and it was a real defect rather than an untidiness: `EncounterFields`
+     * narrows `ctx.confine` while a shrinking field is raised, so a new run started after a
+     * CONTESTED GROUND encounter inherited a phantom ring centred on the OLD volume and the
+     * frame was yanked thousands of metres backwards on its first simulated frame. It survived
+     * this long because nothing in normal play starts a run without passing through the results
+     * screen, and every harness that noticed it read the symptom (a probe measuring an empty
+     * arena) rather than the cause.
+     */
+    this.fields.clear();
+    this.transports.clear();
+    this.clearObjectivePoint();
+    this.marked = null;
     this.player.applyBuild(this.run);
     this.player.vitals.reset(this.player.mods.structure);
     const entry = this.world.entryPoint(this.stops[0].volume);
@@ -372,7 +431,23 @@ export class Game {
     this.hud.setBoss(null);
     this.input.menuMode = false;
     this.input.lockPointer();
+    this.lighting.apply(sectorLook(this.run.sector), 0);
+    this.audio.setSectorPalette(this.run.sector);
     this.hud.toast(`SEED ${seed} · ${this.run.chains.map((c) => c.name).join('  →  ')}`);
+    const open = comms.draw('open', this.run.sector);
+    if (open) this.issueComm(open.from, open.text, this.run.sector);
+  }
+
+  /**
+   * Render a comm line. The voice degrades with depth, and the degradation happens HERE rather
+   * than in the writing, so one authored line reads correctly at every sector.
+   */
+  private issueComm(from: string, lines: string[], sector: number, hold = 6.5) {
+    this.hud.comm(
+      Comms.tag(from, sector),
+      lines.map((l, i) => Comms.degrade(l, sector, i)),
+      hold,
+    );
   }
 
   /** Turn a resident sector's volumes into the ordered list of stops the run plays through. */
@@ -387,8 +462,26 @@ export class Game {
     this.stops.push(...added);
   }
 
-  /** The seed picks one of the sector's two bosses. Two exams, different skills. */
-  private bossLabelFor(_sectorIndex: number) { return this.bossKind === 'gravemark' ? 'GRAVEMARK' : 'SEVERANCE'; }
+  /** The seed picks one of the sector's two bosses. Two exams, different classes. */
+  private bossFor(sectorIndex: number): BossId {
+    return this.bossKind[sectorIndex] ?? BOSS_ROSTER[1][0];
+  }
+  private bossLabelFor(sectorIndex: number) { return BOSS_LABEL[this.bossFor(sectorIndex)]; }
+
+  /**
+   * What the chain generator is allowed to know about the run, for reactor-specific and secret
+   * chain gating (§2.6). Everything here is a fact the run already tracks; nothing is invented
+   * for the purpose, which is why a secret chain cannot become a hidden difficulty lever.
+   */
+  private runContext(): RunContext {
+    const scores = this.run.encounterScores;
+    return {
+      reactor: this.run.reactor,
+      previousSRank: scores.length > 0 && scores[scores.length - 1].rank.startsWith('S'),
+      untouchedStructure: this.player.vitals.damageTaken <= 0 && scores.every((x) => x.integrity === null || x.integrity >= 99.5),
+      prototypeHeld: false,   // PROTOTYPE upgrades arrive in v0.5
+    };
+  }
 
   /** Checkpoint C evidence: the procedural setup RETRY SEED must reproduce exactly. */
   private captureSetupProof() {
@@ -407,8 +500,15 @@ export class Game {
 
   private beginStop(stop: Stop) {
     stop.started = true;
+    /**
+     * `resetEncounter` derives the forward bias from the FALL tier and FLANK DEBT. The line that
+     * used to follow it here overwrote that with the baseline 0.18 on entry to every encounter,
+     * which made BOTH levers inert in real play: the ladder's upper tiers never ran the bias
+     * they are specced with, and the FLANK DEBT downside cost the player nothing at all.
+     * Measured before the fix: mean arc with FLANK DEBT held was 125.4 degrees against 125.6
+     * without it — a delta of -0.2 degrees where v2.3 PATCH 4 requires at least +12.
+     */
     this.director.resetEncounter(this.run.sector);
-    this.director.forwardBias = T.orbitForwardBias;
     this.wavesSpawned = 0;
     this.lastStagger.clear();
     this.convertedThisStagger.clear();
@@ -432,6 +532,20 @@ export class Game {
       const c = this.world.volumeCentre(stop.volume);
       const r = stop.volume.radius > 0 ? stop.volume.radius : stop.volume.halfWidth;
       this.fields.raise(variant, c, r, this.director.fall.geometryPressure, (x, z) => this.world.groundAt(x, z));
+
+      // OBJECTIVE: raise the thing that has to survive, before the first wave exists.
+      this.clearObjectivePoint();
+      this.marked = null;
+      if (variant.objective === 'defend' || variant.objective === 'escort') {
+        const at = new THREE.Vector3(c.x, 0, stop.volume.z0 + (stop.volume.z1 - stop.volume.z0) * 0.35);
+        at.y = this.world.groundAt(at.x, at.z);
+        this.point = new ObjectivePoint(this.scene, variant.objective, at, variant.pointStructure ?? OBJECTIVE_STRUCTURE);
+        if (variant.objective === 'escort') {
+          const to = new THREE.Vector3(c.x, 0, stop.volume.z1 - 90);
+          to.y = this.world.groundAt(to.x, to.z);
+          this.point.setRoute(to, ESCORT_SPEED);
+        }
+      }
 
       if (variant.objective === 'destroy-targets') {
         const n = variant.targets ?? 3;
@@ -462,7 +576,10 @@ export class Game {
     if (!stop.state) return;
     const spec = ENCOUNTERS[stop.state];
     const variant = stop.variant;
-    const pool = variant?.pool?.length ? variant.pool : spec.pool;
+    // A variant's authored pool wins; otherwise the state's pool, widened by the sector's
+    // native archetypes (SPLITTER and HOOK arrive with MANUFACTURE).
+    const pool = variant?.pool?.length ? variant.pool : poolFor(stop.state, this.run.sector);
+    void spec;
     const range = variant?.count ?? spec.hostiles;
     const rng = RNG.stream('spawn');
     const centre = this.world.volumeCentre(stop.volume);
@@ -506,7 +623,31 @@ export class Game {
     if (variant?.suddenStart) for (const e of spawned) e.vitals.structure = Math.round(e.vitals.structureMax * variant.suddenStart);
     if (variant?.tightWindups) for (const e of spawned) e.makeElite(ELITES.phased);
     if (variant?.mirrorReactor) for (const e of spawned) e.makeElite(ELITES.relentless);
+    /**
+     * ASSASSINATE. One frame in the opening composition is marked; killing it clears the
+     * encounter and the rest are weather. The mark is a HUD and silhouette state only — the
+     * marked frame's structure, impact and attack table are untouched, because a target worth
+     * reaching should be hard to REACH, not hard to kill.
+     */
+    if (initial && variant?.objective === 'assassinate' && spawned.length) {
+      const mark = spawned[RNG.stream('spawn').int(0, spawned.length - 1)];
+      this.marked = mark;
+      /**
+       * ANCHOR, not SCREENED. The mark must be hard to REACH, not hard to kill: a frontal plate
+       * would make the configuration a damage problem, and ANCHOR is the modifier whose whole
+       * description is "the formation orients on it — break the anchor or the arc never closes".
+       * The rest of the composition physically stands between you and it, which is the ask.
+       */
+      mark.makeElite(ELITES.anchor);
+      this.hud.toast(`MARK · ${mark.displayName} — THE OTHERS DO NOT MATTER`);
+      this.hud.flash('TARGET MARKED', '#ffd24a');
+    }
     if (!initial) this.hud.toast('REINFORCEMENTS');
+  }
+
+  private clearObjectivePoint() {
+    if (this.point) { this.point.dispose(this.scene); this.point = null; }
+    this.hud.setObjectivePoint(null);
   }
 
   private clearStop(stop: Stop) {
@@ -514,6 +655,8 @@ export class Game {
     stop.cleared = true;
     this.fields.clear();
     this.transports.clear();
+    this.clearObjectivePoint();
+    this.marked = null;
     this.world.openGate(stop.volume);
     if (stop.kind === 'node' && stop.state) {
       this.director.pilot.commitEncounter();
@@ -547,7 +690,7 @@ export class Game {
     this.run.begin('TUTORIAL', 'vector', 1);
     this.director.setFall(tierFor(1));
     this.world.reset();
-    const chain = { id: 'tutorial', name: 'ORIENTATION', sequence: ['ARENA' as const], dominantStress: 'ROTATION' as const, tissue: [], sector: 1 };
+    const chain = { id: 'tutorial', name: 'ORIENTATION', sequence: ['ARENA' as const], dominantStress: 'ROTATION' as const, tissue: [], sector: 1, kind: 'standard' as const };
     const sector = this.world.beginSector([chain], 1, false);
     this.stops = [];
     this.stopIndex = 0;
@@ -681,6 +824,15 @@ export class Game {
     this.hud.transit('FORGE', 'LOCKS ENGAGING', '', true);
     this.input.releasePointer();
     this.input.menuMode = true;
+    /**
+     * The comm line is drawn as the machine SETTLES, not when the cards appear. Choreographically
+     * that is when the stillness starts; practically it means the beat exists as a fact about the
+     * run the moment the FORGE is entered, rather than depending on a wall-clock animation phase
+     * having elapsed.
+     */
+    const line = comms.draw('forge', this.run.sector);
+    if (line) this.screens.setForgeComm(Comms.tag(line.from, this.run.sector), line.text.map((l, i) => Comms.degrade(l, this.run.sector, i)));
+    else this.screens.setForgeComm(null, []);
   }
 
   private updateForge(dt: number) {
@@ -747,33 +899,69 @@ export class Game {
   private beginBoss(stop: Stop) {
     this.clearHostiles();
     this.fields.clear();
+    this.clearObjectivePoint();
     const centre = this.world.volumeCentre(stop.volume);
     const pos = new THREE.Vector3(centre.x, this.world.groundAt(centre.x, centre.z), centre.z);
+    const kind = this.bossFor(this.run.sector);
+    this.bossFrames = [];
 
-    if (this.bossKind === 'gravemark') {
-      const g = new Gravemark(this.ctx, pos);
-      g.onPhaseChange = () => { this.hud.flash('PHASE 2', '#5ae8d4'); this.hud.toast('RELAY RESPAWN 14s → 9s · QUAKE ONLINE'); };
-      g.onScreenChange = (screened) => {
-        this.hud.flash(screened ? 'SCREENED' : 'SCREEN BROKEN', screened ? '#5ae8d4' : '#ffd24a');
-      };
-      this.boss = g;
-      this.hostiles.push(g);
-      g.deployEscort();
-      this.hud.setBossBanner('GRAVEMARK', 'FORMATION · ROTATION', 'DRIVE THE RELAYS OUT OF ITS REAR ARC');
-      this.hud.toast('ZERO STRUCTURAL DAMAGE WHILE 2+ RELAYS HOLD THE REAR 180°');
-    } else {
-      const sv = new Severance(this.ctx, pos);
-      sv.onPhaseChange = () => { this.hud.flash('PHASE 2', '#ff5a7a'); this.hud.toast('COUNTER-VANISH · 60% SEEDED · 4.0s COOLDOWN'); };
-      sv.onCounterVanish = () => { this.hud.flash('COUNTER-VANISH', '#ff5a7a'); };
-      this.boss = sv;
-      this.hostiles.push(sv);
-      this.hud.setBossBanner('SEVERANCE', 'ACE · EXECUTION', 'READ THE FRAME THAT READS YOU');
+    switch (kind) {
+      case 'gravemark': {
+        const g = new Gravemark(this.ctx, pos);
+        g.onPhaseChange = () => { this.hud.flash('PHASE 2', '#5ae8d4'); this.hud.toast('RELAY RESPAWN 14s → 9s · QUAKE ONLINE'); };
+        g.onScreenChange = (screened) => this.hud.flash(screened ? 'SCREENED' : 'SCREEN BROKEN', screened ? '#5ae8d4' : '#ffd24a');
+        this.boss = g;
+        this.hostiles.push(g);
+        g.deployEscort();
+        this.hud.toast('ZERO STRUCTURAL DAMAGE WHILE 2+ RELAYS HOLD THE REAR 180°');
+        break;
+      }
+      case 'chorus': {
+        const trio = Chorus.deploy(this.ctx, pos);
+        const conductor = trio[0];
+        conductor.onPhaseChange = (p) => {
+          this.hud.flash(`PHASE ${p}`, '#9fc8ff');
+          this.hud.toast(p === 2 ? 'THE VOICES ARE PUSHING APART' : 'THEY ARE SWAPPING BANDS · THE SHAPE WILL NOT HOLD STILL');
+        };
+        conductor.onHarmonyChange = (h) => this.hud.flash(h ? 'HARMONY' : 'HARMONY BROKEN', h ? '#9fc8ff' : '#ffd24a');
+        this.boss = conductor;
+        this.bossFrames = trio;
+        for (const v of trio) this.hostiles.push(v);
+        this.hud.toast(`ZERO STRUCTURAL DAMAGE WHILE THE VOICES SPAN ${Chorus.HARMONY_ARC}° OR MORE FROM WHERE YOU STAND`);
+        break;
+      }
+      case 'kilnworks': {
+        const k = new Kilnworks(this.ctx, pos, { z0: stop.volume.z0, z1: stop.volume.z1 });
+        k.onPhaseChange = (p) => {
+          this.hud.flash(`PHASE ${p}`, '#ffa04a');
+          this.hud.toast(p === 2 ? 'THE LINE HAS REVERSED · RIDE IT AGAINST THE TRAVEL' : 'THE POUR IS OPEN · IT IS ARMOURED FROM THE FRONT');
+        };
+        k.onArmSever = (left) => { this.hud.flash('FEED ARM SEVERED', '#ffa04a'); this.hud.toast(`${left} FEED ARM${left === 1 ? '' : 'S'} STANDING`); };
+        this.boss = k;
+        this.hostiles.push(k);
+        k.deployArms();
+        this.bossFrames = [k];
+        this.hud.toast('THE LINE TRAVELS FOR THE WHOLE FIGHT · NO POSITION IS HOLDABLE');
+        break;
+      }
+      default: {
+        const sv = new Severance(this.ctx, pos);
+        sv.onPhaseChange = () => { this.hud.flash('PHASE 2', '#ff5a7a'); this.hud.toast('COUNTER-VANISH · 60% SEEDED · 4.0s COOLDOWN'); };
+        sv.onCounterVanish = () => this.hud.flash('COUNTER-VANISH', '#ff5a7a');
+        this.boss = sv;
+        this.hostiles.push(sv);
+        break;
+      }
     }
 
-    this.metrics.begin(this.bossLabelFor(this.run.sector), this.player.vitals.structureMax, true);
+    const label = BOSS_LABEL[kind];
+    this.hud.setBossBanner(label, BOSS_CLASS[kind], BOSS_BRIEF[kind], this.run.sector);
+    this.metrics.begin(label, this.player.vitals.structureMax, true);
     this.hud.setBoss(this.boss);
     this.audio.bossRoar();
-    this.hud.flash(this.bossLabelFor(this.run.sector), this.bossKind === 'gravemark' ? '#5ae8d4' : '#ff5a7a');
+    this.hud.flash(label, kind === 'gravemark' ? '#5ae8d4' : kind === 'chorus' ? '#9fc8ff' : kind === 'kilnworks' ? '#ffa04a' : '#ff5a7a');
+    const intro = comms.draw('boss', this.run.sector, { boss: label });
+    if (intro) this.issueComm(intro.from, intro.text, this.run.sector, 7.5);
   }
 
   // ================================================================================ events
@@ -826,6 +1014,8 @@ export class Game {
         this.player.dealDamage(foe, T.rallyWinDamage, T.rallyWinImpact, 'rally');
         this.hud.flash('EXCHANGE WON', '#ffd24a');
       }
+      // COUNTERWEIGHT: the win is not applied to one frame, it is applied to the ring of them.
+      this.player.applyCounterweight(foe.pos);
       this.audio.rallyWin();
       this.fx.impact(foe.pos.clone().setY(foe.pos.y + 10), 0xffffff, 6, 22);
       this.enterSlow(0.35, 0.5);
@@ -866,6 +1056,9 @@ export class Game {
     if (stop) { stop.cleared = true; this.world.openGate(stop.volume); }
     this.hud.flash('BOSS DOWN', '#8ff4ff');
     this.enterSlow(0.2, 2.2);
+    this.bossFrames = [];
+    const clear = comms.draw('clear', this.run.sector);
+    if (clear) this.issueComm(clear.from, clear.text, this.run.sector, 7.0);
     if (this.run.sector < this.run.sectorPlan) {
       // more sector to descend: the run continues through connective tissue
       setTimeout(() => this.advanceSector(), 2000);
@@ -945,7 +1138,6 @@ export class Game {
     const dt = realDt * this.timeScale;
     this.simTime += dt;
     this.ctx.time = this.simTime;
-    this.ctx.telegraphLead = this.player.mods.telegraphLead;
 
     switch (this.mode) {
       case 'title': this.updateTitle(realDt); break;
@@ -972,6 +1164,8 @@ export class Game {
 
     // Sector lifecycle: spend a few ms building the next sector, and release any the player has
     // left. Both are no-ops in a single-sector run.
+    this.lighting.tick(realDt);
+    this.audio.setSectorPalette(this.run.sector);
     this.world.pump();
     if (this.mode === 'run') this.world.retirePassed(this.player.pos.z);
     const streamState = this.world.stream(this.player.pos.z);
@@ -1000,6 +1194,28 @@ export class Game {
     }
     this.input.endFrame();
   }
+
+  /**
+   * SECTOR 2's conveyor bands. The flow carries the pilot AND every hostile standing in it, so a
+   * formation that was holding a bearing drifts out of it for free — positioning pressure with
+   * no damage value, no structure value and no arc threshold anywhere near it.
+   */
+  private applyConveyors(dt: number) {
+    const flow = this.flowScratch;
+    this.world.flowAt(this.player.pos, flow);
+    if (flow.lengthSq() > 0) {
+      this.player.pos.addScaledVector(flow, dt);
+      this.world.confine(this.player.pos, 0);
+    }
+    for (const h of this.hostiles) {
+      this.world.flowAt(h.pos, flow);
+      if (flow.lengthSq() > 0) {
+        h.pos.addScaledVector(flow, dt);
+        this.world.confine(h.pos, 6);
+      }
+    }
+  }
+  private flowScratch = new THREE.Vector3();
 
   private updateTitle(realDt: number) {
     this.updateIdleCamera(realDt);
@@ -1041,12 +1257,25 @@ export class Game {
     this.rally.tickReal(realDt);
     const canAct = !this.rally.active && this.mode === 'run';
 
+    // SHARED FAULT is evaluated over the roster before anyone thinks, so a hostile that walked
+    // into a broken frame's field this frame winds up slowly this frame.
+    this.player.applySharedFault();
     this.player.update(dt, this.input, canAct);
     for (const h of this.hostiles) h.update(dt);
+    this.applyConveyors(dt);
     this.ordnance.update(dt, this.simTime);
     this.world.update(dt, this.simTime, this.player);
     this.fields.update(dt, this.simTime, this.player);
     this.transports.update(dt, (x, z) => this.world.groundAt(x, z));
+    if (this.point) {
+      this.point.update(dt, this.simTime, this.hostiles as Hostile[], this.fx, (x, z) => this.world.groundAt(x, z));
+      this.hud.setObjectivePoint({
+        kind: this.point.kind,
+        structure01: this.point.structure01,
+        threats: this.point.threats,
+        label: this.point.kind === 'escort' ? 'ASSET' : 'EMPLACEMENT',
+      });
+    }
 
     this.director.update(dt, this.hostiles as Hostile[], this.player, this.player.energy01);
     this.director.pilot.sample(dt, { airborne: !this.player.grounded, speed: this.player.speed, locked: !!this.player.lock.primary });
@@ -1103,7 +1332,7 @@ export class Game {
 
       if (combat) {
         if (this.hostiles.length === 0) {
-          if (this.wavesSpawned >= waves) { if (objective === 'clear' || objective === 'intercept') this.clearStop(stop); }
+          if (this.wavesSpawned >= waves) { if (objective === 'clear' || objective === 'intercept' || objective === 'assassinate') this.clearStop(stop); }
           else { this.wavesSpawned++; this.spawnWave(stop, false); this.waveT = this.director.pressure.reinforcementTiming; }
         } else if (waves > this.wavesSpawned) {
           this.waveT -= 1 / 60;
@@ -1136,6 +1365,48 @@ export class Game {
           this.hud.setObjective(variant!.brief, `${this.hostiles.length} RUNNING · ${Math.max(0, this.objectiveT).toFixed(0)}s`);
           if (this.objectiveT <= 0) { this.hud.flash('IT GOT AWAY', '#ff5a5a'); this.clearStop(stop); }
           break;
+
+        /**
+         * DEFEND — hold the emplacement through the waves. Every wave must be cleared AND the
+         * point must survive; the point falling ends the encounter as a failure, which is
+         * recorded rather than fatal. Nothing about the point grants a hostile a token.
+         */
+        case 'defend': {
+          this.objectiveT -= 1 / 60;
+          const p = this.point;
+          if (!p) { this.clearStop(stop); break; }
+          this.hud.setObjective(variant!.brief, `EMPLACEMENT ${Math.round(p.structure01 * 100)}% · WAVE ${Math.min(waves, this.wavesSpawned + 1)}/${waves} · ${Math.max(0, this.objectiveT).toFixed(0)}s`);
+          if (!p.alive) { this.hud.flash('EMPLACEMENT LOST', '#ff5a5a'); this.clearStop(stop); break; }
+          if (this.objectiveT <= 0 && this.hostiles.length === 0) this.clearStop(stop);
+          break;
+        }
+
+        /**
+         * ASSASSINATE — one marked frame inside a formation. Killing the mark clears it; the
+         * rest of the composition is a positional problem to be solved, not a health bar to be
+         * emptied. Falling back to a clear if the mark somehow never spawned.
+         */
+        case 'assassinate': {
+          const mark = this.marked;
+          this.hud.setObjective(variant!.brief, mark && mark.alive
+            ? `MARK · ${mark.displayName} · ${Math.round(mark.vitals.structure01 * 100)}% · ${this.hostiles.length} IN THE WAY`
+            : 'MARK DOWN');
+          if (mark && !mark.alive) { this.hud.flash('MARK DOWN', '#ffd24a'); this.clearStop(stop); }
+          break;
+        }
+
+        /**
+         * ESCORT — the asset moves, and it decides where you have to be. It clears when the
+         * asset reaches the far end of the volume alive; the waves are what stands between.
+         */
+        case 'escort': {
+          const p = this.point;
+          if (!p) { this.clearStop(stop); break; }
+          this.hud.setObjective(variant!.brief, `ASSET ${Math.round(p.structure01 * 100)}% · ${p.threats > 0 ? `${p.threats} ON IT` : 'CLEAR'}`);
+          if (!p.alive) { this.hud.flash('ASSET LOST', '#ff5a5a'); this.clearStop(stop); break; }
+          if (p.arrived) { this.hud.flash('ASSET DELIVERED', '#8ff4ff'); this.clearStop(stop); }
+          break;
+        }
         default: break;
       }
     }
@@ -1160,7 +1431,9 @@ export class Game {
     if (!reached || !stop.started) return;
 
     const nextIndex = this.run.sector + 1;
-    const sel = selectChains(1, this.run.chains[this.run.chains.length - 1]?.dominantStress ?? null);
+    // Draw from the NEXT sector's authored pool, not Sector 1's. `selectChains` falls back to
+    // Sector 1 when a depth has no pool yet, so the lifecycle proof still chains instances.
+    const sel = selectChains(nextIndex, this.run.chains[this.run.chains.length - 1]?.dominantStress ?? null, this.runContext());
     this.nextChains = [sel.chains[0], sel.chains[1]];
     this.nextLaw2 = sel.law2;
     if (this.world.queueSector(this.nextChains, nextIndex, nextIndex < this.run.sectorPlan)) {
@@ -1195,6 +1468,9 @@ export class Game {
     this.hud.setBoss(null);
     this.hud.flash(`SECTOR ${String(next.sectorIndex).padStart(2, '0')}`, '#8ff4ff');
     this.hud.toast(`PILOT MODEL AND BUILD CARRIED THROUGH · ${this.run.classification.name}`);
+    // The boundary changes the world, so it changes the light and the score's palette with it.
+    this.lighting.apply(sectorLook(this.run.sector));
+    this.audio.setSectorPalette(this.run.sector);
     this.mode = 'run';
     return true;
   }
@@ -1215,7 +1491,21 @@ export class Game {
       currentStreamStates: RNG.states(),
       chainLaws: {
         law2: this.run.law2,
-        chains: this.run.chains.map((c) => ({ id: c.id, sequence: c.sequence, dominantStress: c.dominantStress })),
+        chains: this.run.chains.map((c) => ({ id: c.id, sequence: c.sequence, dominantStress: c.dominantStress, kind: c.kind })),
+        census: [1, 2].map((n) => chainCensus(n)),
+      },
+      /**
+       * v0.3 content census. Counted from the tables at runtime rather than asserted in a
+       * document, so a roster that silently loses an entry fails the audit instead of the
+       * playtest.
+       */
+      content: {
+        upgrades: UPGRADE_IDS.length,
+        evolutions: EVOLUTION_IDS.length,
+        reactors: REACTOR_IDS.length,
+        archetypes: ARCHETYPE_IDS.length,
+        bosses: Object.values(BOSS_ROSTER).flat(),
+        sectorsBuilt: SECTORS_BUILT,
       },
     });
     g.__game = this;
@@ -1360,6 +1650,8 @@ export class Game {
       },
       elites: () => this.hostiles.filter((h) => h.isElite).map((h) => ({ id: h.id, archetype: h.archetype, elite: h.elite?.name })),
       variants: () => VARIANTS.map((v) => ({ id: v.id, state: v.state, name: v.name, geometry: v.geometry, objective: v.objective })),
+      /** Earliest sector each state exists in, so a walk knows how deep to go to reach it. */
+      stateDepths: () => Object.fromEntries((Object.keys(ENCOUNTERS) as EncounterId[]).map((k) => [k, ENCOUNTERS[k].fromSector])),
       variantsByState: () => Object.fromEntries(Object.entries(VARIANTS_BY_STATE).map(([k, v]) => [k, v.map((x) => x.id)])),
       currentVariant: () => (this.variant ? { ...this.variant, fields: this.fields.snapshot(), transports: this.transports.remaining } : null),
       /** Force the next entry into `state` to use a named variant — used to walk all 24. */
@@ -1372,7 +1664,7 @@ export class Game {
         stop.started = false;
         return { stop: stop.label, variant: v.id };
       },
-      stops: () => this.stops.map((x) => ({ kind: x.kind, label: x.label, z0: x.volume.z0, z1: x.volume.z1, started: x.started, cleared: x.cleared })),
+      stops: () => this.stops.map((x) => ({ kind: x.kind, label: x.label, sector: x.sector, z0: x.volume.z0, z1: x.volume.z1, started: x.started, cleared: x.cleared })),
       settings: () => ({ onboarded: settings.onboarded, assists: settings.snapshot() }),
       startOnboarding: () => { this.startOnboarding(); return this.onboarding.beat.id; },
       onboarding: () => ({ beat: this.onboarding.beat.id, t: +this.onboarding.t.toFixed(2), finished: this.onboarding.finished, story: this.onboarding.tokenStory() }),
@@ -1423,8 +1715,10 @@ export class Game {
         return this.hostiles.length;
       },
       boss: () => (this.boss ? this.boss.snapshotBoss() : null),
-      bossKind: () => this.bossKind,
-      setBossKind: (k: 'severance' | 'gravemark') => { this.bossKind = k; return this.bossKind; },
+      bossKind: () => ({ ...this.bossKind }),
+      bossRoster: () => BOSS_ROSTER,
+      setBossKind: (k: BossId, sector = this.run.sector) => { this.bossKind[sector] = k; return { ...this.bossKind }; },
+      bossFrames: () => this.bossFrames.map((b) => ({ name: b.bossName, structure: Math.round(b.vitals.structure), alive: b.alive })),
 
       /** Profiling: clear the field so a scenario measures only what it stages. */
       clear: () => { this.clearHostiles(); this.ordnance.clear(); this.fx.clear(); return 0; },
@@ -1497,6 +1791,112 @@ export class Game {
         return { frames, p50: pct(0.5), p95: pct(0.95), worst: +ms[ms.length - 1].toFixed(3) };
       },
       step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) this.tick(dt); return this.state(); },
+
+      // ------------------------------------------------------------------- v0.3 additions
+      /** Jump the run to a sector without playing the one before it. */
+      gotoSector: (n: number) => {
+        this.run.sectorPlan = Math.max(this.run.sectorPlan, n);
+        let guard = 0;
+        while (this.run.sector < n && guard++ < 8) {
+          if (this.queuedSector <= this.run.sector) {
+            const sel = selectChains(this.run.sector + 1, null, this.runContext());
+            this.nextChains = [sel.chains[0], sel.chains[1]];
+            this.nextLaw2 = sel.law2;
+            this.world.queueSector(this.nextChains, this.run.sector + 1, this.run.sector + 1 < this.run.sectorPlan);
+            this.queuedSector = this.run.sector + 1;
+          }
+          while (this.world.building) this.world.pump();
+          if (!this.advanceSector()) break;
+        }
+        // stand the frame at the entry of the new sector's first stop
+        const stop = this.currentStop();
+        if (stop) {
+          const e = this.world.entryPoint(stop.volume);
+          this.player.pos.copy(e);
+          this.player.vel.set(0, 0, 0);
+          this.player.resetForEncounter(false);
+          this.director.resetEncounter(this.run.sector);
+        }
+        return { sector: this.run.sector, stops: this.stops.filter((x) => x.sector === this.run.sector).map((x) => x.label) };
+      },
+      /**
+       * Stage a named encounter CONFIGURATION deterministically and begin it on the same call.
+       *
+       * §20's first defect was that `skipToLabel` teleports into a volume and leaves the
+       * encounter to start on some later frame, so a probe that measures immediately measures an
+       * empty arena. This stages the fight before returning and reports the composition it
+       * staged, so a probe can assert `startHostiles > 0` rather than discard afterwards.
+       */
+      stageVariant: (id: string) => {
+        const v = VARIANTS.find((x) => x.id === id);
+        if (!v) return 'no such variant: ' + id;
+        const idx = this.stops.findIndex((x) => x.kind === 'node' && x.state === v.state);
+        if (idx < 0) return 'no stop for state ' + v.state;
+        for (let i = 0; i < idx; i++) { this.stops[i].started = true; this.stops[i].cleared = true; this.world.openGate(this.stops[i].volume); }
+        for (let i = idx; i < this.stops.length; i++) { this.stops[i].started = false; this.stops[i].cleared = false; this.world.closeGate(this.stops[i].volume); }
+        this.clearHostiles();
+        this.ordnance.clear();
+        this.stopIndex = idx;
+        const stop = this.stops[idx];
+        stop.variant = v;
+        const z = stop.volume.z0 + Math.min(160, (stop.volume.z1 - stop.volume.z0) * 0.25);
+        this.player.pos.set(0, this.world.groundAt(0, z), z);
+        this.player.vel.set(0, 0, 0);
+        this.player.resetForEncounter(false);
+        this.director.resetEncounter(this.run.sector);
+        this.mode = 'run';
+        this.beginStop(stop);
+        return {
+          variant: v.id, state: v.state, objective: v.objective, sector: this.run.sector,
+          startHostiles: this.hostiles.length,
+          point: this.point ? this.point.snapshot() : null,
+          marked: this.marked ? this.marked.id : null,
+          transports: this.transports.remaining,
+        };
+      },
+      /** Stage a named boss immediately, in the sector that owns it. */
+      stageBoss: (kind: BossId) => {
+        const sector = Object.keys(BOSS_ROSTER).map(Number).find((n) => BOSS_ROSTER[n].includes(kind));
+        if (!sector) return 'no such boss: ' + kind;
+        if (this.run.sector !== sector) {
+          const r = (g.__dev as { gotoSector(n: number): unknown }).gotoSector(sector);
+          if (this.run.sector !== sector) return { failed: 'could not reach sector ' + sector, got: r };
+        }
+        this.bossKind[sector] = kind;
+        const idx = this.stops.findIndex((x) => x.kind === 'boss' && x.sector === sector);
+        if (idx < 0) return 'no boss stop in sector ' + sector;
+        for (let i = 0; i < idx; i++) { this.stops[i].started = true; this.stops[i].cleared = true; this.world.openGate(this.stops[i].volume); }
+        this.stopIndex = idx;
+        const stop = this.stops[idx];
+        stop.started = true; stop.cleared = false;
+        const z = stop.volume.z0 + 60;
+        this.player.pos.set(0, this.world.groundAt(0, z), z);
+        this.player.vel.set(0, 0, 0);
+        this.player.resetForEncounter(false);
+        this.director.resetEncounter(this.run.sector);
+        this.mode = 'run';
+        this.beginBoss(stop);
+        return { boss: kind, sector, frames: this.hostiles.length, snapshot: this.boss?.snapshotBoss() ?? null };
+      },
+      objective: () => (this.point ? this.point.snapshot() : null),
+      marked: () => (this.marked ? { id: this.marked.id, alive: this.marked.alive } : null),
+      conveyors: () => {
+        const v = new THREE.Vector3();
+        this.world.flowAt(this.player.pos, v);
+        return { atPlayer: [+v.x.toFixed(2), +v.z.toFixed(2)], magnitude: +v.length().toFixed(2) };
+      },
+      lineOfSight: () => {
+        const t = this.player.lock.primary;
+        if (!t) return null;
+        return { target: t.id, clear: this.world.hasLineOfSight(this.player.pos.clone().setY(this.player.pos.y + 8), t.pos.clone().setY(t.pos.y + 7)) };
+      },
+      comms: () => comms.snapshot(),
+      resetComms: () => { comms.reset(); return comms.snapshot(); },
+      /** Force the next entry to a state to use a named variant AND stage it immediately. */
+      chainCensus: () => [1, 2].map((n) => chainCensus(n)),
+      buildMods: () => ({ ...this.player.mods }),
+      /** Take every upgrade in the roster, for the Law III and classifier audits. */
+      giveAll: () => { for (const id of UPGRADE_IDS) this.run.takeUpgrade(id); this.player.applyBuild(this.run); this.hud.buildHardpoints(this.run); return this.run.upgrades.length; },
     };
   }
 
@@ -1532,6 +1932,10 @@ export class Game {
         encounters: this.run.encounterScores.map((s) => ({ label: s.label, final: +s.final.toFixed(2), rank: s.rank })),
       },
       boss: this.boss ? this.boss.snapshotBoss() : null,
+      objective: this.point ? this.point.snapshot() : null,
+      marked: this.marked && this.marked.alive ? { id: this.marked.id, archetype: this.marked.archetype, structure01: +this.marked.vitals.structure01.toFixed(3) } : null,
+      narrative: comms.snapshot(),
+      sectorLook: { index: this.run.sector, name: sectorLook(this.run.sector).name, subtitle: sectorLook(this.run.sector).subtitle, interior: sectorLook(this.run.sector).interior, musicPalette: this.audio.sectorPaletteName },
       perf: {
         frameTime: +this.lastFrameMs.toFixed(2),
         drawCalls: this.lastDrawCalls,

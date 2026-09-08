@@ -31,6 +31,8 @@ export interface Bolt {
   gravity: number;
   mesh: THREE.Mesh;
   interceptable: boolean;
+  /** Radians of GRAVITY THRUSTERS deflection already spent on this round. */
+  deflected: number;
 }
 
 export interface MineEntity {
@@ -51,6 +53,25 @@ export interface CoreEntity {
   mesh: THREE.Object3D;
 }
 
+/** CONTRAIL WEAVE: a segment of boost trail that is solid enough to hurt. */
+export interface TrailSegment {
+  a: THREE.Vector3;
+  b: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  width: number;
+  damage: number;   // per second
+  impact: number;   // per second
+  mesh: THREE.Mesh;
+}
+
+/** ECHO SPLIT: an afterimage a hostile can be fooled into aiming at. */
+export interface DecoyEntity {
+  pos: THREE.Vector3;
+  life: number;
+  rig: THREE.Object3D;
+}
+
 export interface CloneEntity {
   pos: THREE.Vector3;
   yaw: number;
@@ -62,18 +83,29 @@ export interface CloneEntity {
 
 export interface OrdnanceHooks {
   onPlayerHit(damage: number, impact: number, from: Hostile | null, attack: string): void;
-  onHostileHit(h: Hostile, damage: number, impact: number, source: 'missile' | 'clone' | 'upgrade'): void;
+  onHostileHit(h: Hostile, damage: number, impact: number, source: 'missile' | 'clone' | 'upgrade' | 'contrail'): void;
   onCorePickup(energy: number): void;
   playerPos(): THREE.Vector3;
   hostiles(): Hostile[];
   groundAt(x: number, z: number): number;
 }
 
+/** How fast a deflected round may turn, radians/second. The cap on TOTAL turn is the card's. */
+const DEFLECT_RATE = 3.2;
+
 export class Ordnance {
   bolts: Bolt[] = [];
   mines: MineEntity[] = [];
   cores: CoreEntity[] = [];
   clones: CloneEntity[] = [];
+  trail: TrailSegment[] = [];
+  decoys: DecoyEntity[] = [];
+  /**
+   * GRAVITY THRUSTERS. While this is live, hostile ordnance inside `radius` is steered toward the
+   * pilot's WAKE rather than the pilot — capped at `angle`, so a round that was never going to
+   * hit is not magically redirected into one that was.
+   */
+  deflect: { t: number; radius: number; angle: number; wake: THREE.Vector3 } | null = null;
   /** Orbiting Interceptors: live count and the rebuild timer. */
   interceptors = 0;
   interceptorsMax = 0;
@@ -97,7 +129,7 @@ export class Ordnance {
       pos: o.pos.clone(), vel: o.vel.clone(), life: o.life ?? 4, damage: o.damage, impact: o.impact,
       hostile: o.hostile, colour: o.colour, radius: o.radius ?? 4, homing: o.homing ?? 0,
       target: o.target ?? null, aim: o.aim ? o.aim.clone() : null, source: o.source ?? null,
-      attack: o.attack ?? 'bolt', gravity: o.gravity ?? 0, mesh, interceptable: o.interceptable ?? true,
+      attack: o.attack ?? 'bolt', gravity: o.gravity ?? 0, mesh, interceptable: o.interceptable ?? true, deflected: 0,
     };
     this.bolts.push(b);
     return b;
@@ -113,14 +145,14 @@ export class Ordnance {
     return b;
   }
 
-  spawnMine(pos: THREE.Vector3, damage: number, impact: number, colour: number, hostile: boolean) {
+  spawnMine(pos: THREE.Vector3, damage: number, impact: number, colour: number, hostile: boolean, trigger = MINE.trigger, life = MINE.life) {
     const g = new THREE.Group();
     const body = new THREE.Mesh(new THREE.OctahedronGeometry(1.6, 0), new THREE.MeshStandardMaterial({ color: 0x2a2420, roughness: 0.6, metalness: 0.7 }));
     const core = new THREE.Mesh(new THREE.SphereGeometry(0.75, 10, 8), new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
     g.add(body, core);
     g.position.copy(pos);
     this.scene.add(g);
-    this.mines.push({ pos: pos.clone(), arm: MINE.armTime, life: MINE.life, trigger: MINE.trigger, damage, impact, hostile, mesh: g });
+    this.mines.push({ pos: pos.clone(), arm: MINE.armTime, life, trigger, damage, impact, hostile, mesh: g });
   }
 
   /** Reactor Bleed: a staggered target drops a 40 EN core that persists 8.0s. */
@@ -148,6 +180,47 @@ export class Ordnance {
     rig.rotation.y = yaw;
     this.scene.add(rig);
     this.clones.push({ pos: pos.clone(), yaw, life: duration, fireT: 0.25, rig, damageScale });
+  }
+
+  /**
+   * CONTRAIL WEAVE. Called by the player once per frame while boosting; each call lays one
+   * segment. Damage is expressed per second and applied per second, so the trail's lethality is
+   * a function of how long a hostile stays inside it rather than of frame rate.
+   */
+  pushTrail(a: THREE.Vector3, b: THREE.Vector3, life: number, damage: number, impact: number, width: number, colour: number) {
+    if (a.distanceToSquared(b) < 1) return;
+    const mid = a.clone().add(b).multiplyScalar(0.5);
+    const len = a.distanceTo(b);
+    const geo = new THREE.BoxGeometry(width, 2.2, len);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.34, blending: THREE.AdditiveBlending, depthWrite: false }));
+    mesh.position.copy(mid);
+    mesh.lookAt(b);
+    this.scene.add(mesh);
+    this.trail.push({ a: a.clone(), b: b.clone(), life, maxLife: life, width, damage, impact, mesh });
+  }
+
+  /** ECHO SPLIT. Afterimages of the frame, left where the vanish began. */
+  spawnDecoys(rigSource: THREE.Object3D, around: THREE.Vector3, count: number, life: number, colour: number) {
+    for (const d of this.decoys) this.scene.remove(d.rig);
+    this.decoys.length = 0;
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2;
+      const pos = around.clone().add(new THREE.Vector3(Math.cos(a) * 9, 0, Math.sin(a) * 9));
+      pos.y = Math.max(pos.y, this.hooks.groundAt(pos.x, pos.z));
+      const rig = rigSource.clone(true);
+      rig.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) m.material = new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.26, blending: THREE.AdditiveBlending, depthWrite: false });
+      });
+      rig.position.copy(pos);
+      this.scene.add(rig);
+      this.decoys.push({ pos, life, rig });
+    }
+  }
+
+  /** GRAVITY THRUSTERS: open the deflection window. */
+  setDeflect(duration: number, radius: number, angle: number, wake: THREE.Vector3) {
+    this.deflect = { t: duration, radius, angle, wake: wake.clone() };
   }
 
   setInterceptors(count: number, colour: number) {
@@ -187,10 +260,67 @@ export class Ordnance {
       }
     }
 
+    // ---- GRAVITY THRUSTERS deflection window ----
+    if (this.deflect) {
+      this.deflect.t -= dt;
+      if (this.deflect.t <= 0) this.deflect = null;
+    }
+
+    // ---- CONTRAIL WEAVE trail ----
+    for (let i = this.trail.length - 1; i >= 0; i--) {
+      const t = this.trail[i];
+      t.life -= dt;
+      (t.mesh.material as THREE.MeshBasicMaterial).opacity = 0.34 * clamp01(t.life / t.maxLife);
+      for (const h of hostiles) {
+        if (!h.alive) continue;
+        if (segmentDistance(h.pos, t.a, t.b) < t.width * 0.5 + 5) {
+          this.hooks.onHostileHit(h, t.damage * dt, t.impact * dt, 'contrail');
+        }
+      }
+      if (t.life <= 0) {
+        this.scene.remove(t.mesh);
+        t.mesh.geometry.dispose();
+        (t.mesh.material as THREE.Material).dispose();
+        this.trail[i] = this.trail[this.trail.length - 1];
+        this.trail.pop();
+      }
+    }
+
+    // ---- ECHO SPLIT afterimages ----
+    for (let i = this.decoys.length - 1; i >= 0; i--) {
+      const d = this.decoys[i];
+      d.life -= dt;
+      d.rig.rotation.y += dt * 0.8;
+      d.rig.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) (m.material as THREE.MeshBasicMaterial).opacity = 0.26 * clamp01(d.life / 0.5); });
+      if (d.life <= 0) {
+        this.scene.remove(d.rig);
+        this.decoys[i] = this.decoys[this.decoys.length - 1];
+        this.decoys.pop();
+      }
+    }
+
     // ---- bolts ----
     for (let i = this.bolts.length - 1; i >= 0; i--) {
       const b = this.bolts[i];
       b.life -= dt;
+      // GRAVITY THRUSTERS: bend hostile ordnance into the wake. `deflected` accumulates the
+      // rotation already spent on this round, so the 65 degrees on the card is a hard total per
+      // projectile rather than a per-frame nudge that compounds into a full reversal.
+      if (b.hostile && this.deflect && b.deflected < this.deflect.angle && b.pos.distanceTo(playerPos) < this.deflect.radius) {
+        const want = this.deflect.wake.clone().sub(b.pos);
+        if (want.lengthSq() > 1) {
+          const speed = b.vel.length();
+          const cur = b.vel.clone().normalize();
+          want.normalize();
+          const between = Math.acos(Math.max(-1, Math.min(1, cur.dot(want))));
+          const step = Math.min(DEFLECT_RATE * dt, between, this.deflect.angle - b.deflected);
+          if (step > 1e-4 && between > 1e-4) {
+            cur.lerp(want, step / between).normalize();
+            b.vel.copy(cur.multiplyScalar(speed));
+            b.deflected += step;
+          }
+        }
+      }
       if (b.homing > 0) {
         const aimAt = b.target && b.target.alive ? b.target.pos.clone().setY(b.target.pos.y + 6) : b.aim;
         if (aimAt) {
@@ -328,10 +458,23 @@ export class Ordnance {
     for (const m of this.mines) this.scene.remove(m.mesh);
     for (const c of this.cores) this.scene.remove(c.mesh);
     for (const c of this.clones) this.scene.remove(c.rig);
+    for (const t of this.trail) { this.scene.remove(t.mesh); t.mesh.geometry.dispose(); (t.mesh.material as THREE.Material).dispose(); }
+    for (const d of this.decoys) this.scene.remove(d.rig);
     this.bolts.length = 0; this.mines.length = 0; this.cores.length = 0; this.clones.length = 0;
+    this.trail.length = 0; this.decoys.length = 0;
+    this.deflect = null;
   }
 
-  get entityCount() { return this.bolts.length + this.mines.length + this.cores.length + this.clones.length; }
+  get entityCount() { return this.bolts.length + this.mines.length + this.cores.length + this.clones.length + this.trail.length + this.decoys.length; }
+}
+
+/** Planar distance from a point to a segment — the contrail's hit test. */
+function segmentDistance(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3): number {
+  const abx = b.x - a.x, abz = b.z - a.z;
+  const apx = p.x - a.x, apz = p.z - a.z;
+  const len2 = abx * abx + abz * abz;
+  const t = len2 > 1e-6 ? Math.max(0, Math.min(1, (apx * abx + apz * abz) / len2)) : 0;
+  return Math.hypot(apx - abx * t, apz - abz * t);
 }
 
 function pickNearest(hostiles: Hostile[], from: THREE.Vector3): Hostile | null {

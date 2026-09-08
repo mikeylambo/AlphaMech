@@ -49,6 +49,12 @@ export class Screens {
   private forgeOffer: ForgeOffer | null = null;
   private forgeRun: RunState | null = null;
   private forgeHandlers: { onUpgrade(card: UpgradeCard): void; onEvolution(id: EvolutionId, hp: HardpointId): void; onLaunch(): void } | null = null;
+  /**
+   * The FORGE comm line. Story is stillness, and this is the only still place in the run, so the
+   * dialogue lives inside the build screen rather than over the top of the fight.
+   */
+  private forgeComm: { from: string; lines: string[] } | null = null;
+  setForgeComm(from: string | null, lines: string[]) { this.forgeComm = from ? { from, lines } : null; }
 
   constructor(parent: HTMLElement, private audio: AudioManager) {
     this.title = h('div', 'screen'); this.title.id = 'title';
@@ -76,7 +82,7 @@ export class Screens {
     this.title.innerHTML = `
       <div class="inner">
         <div class="title-mark">BLINK<span>FALL</span></div>
-        <div class="subtitle">SECTOR 01 · EXTERIOR · ALPHA RUN</div>
+        <div class="subtitle">SECTOR 01 EXTERIOR → SECTOR 02 MANUFACTURE · v0.3</div>
         <p class="thesis">A high-speed mech action roguelite about becoming <b>impossible to surround</b>.
           You are stronger than any one of them and weaker than all of them at once.
           The entire skill ceiling lives in that gap.</p>
@@ -84,7 +90,7 @@ export class Screens {
         <div class="falls" id="fallRow"></div>
         <div class="fallnote mono" id="fallNote"></div>
         <div style="margin-top:22px" class="section-title">SELECT REACTOR</div>
-        <div class="cards" id="reactorCards"></div>
+        <div class="cards wrap" id="reactorCards"></div>
         <div class="btnrow">
           <button class="btn" id="btnDeploy">DEPLOY <span class="key mono">ENTER / A</span></button>
           <button class="btn ghost" id="btnReseed">NEW SEED</button>
@@ -182,6 +188,7 @@ export class Screens {
             <span id="forgeStatus">TAKE ONE UPGRADE</span>
           </div>
         </div>
+        ${this.forgeComm ? `<div class="comm forge"><div class="from mono">${this.forgeComm.from}</div><div class="body">${this.forgeComm.lines.map((l) => `<p>${l}</p>`).join('')}</div></div>` : ''}
         <div class="band">
           <div class="section-title">UPGRADES · TAKE ONE</div>
           <div class="cards" id="forgeUpgrades"></div>
@@ -258,7 +265,8 @@ export class Screens {
   // ============================================================================= RESULTS
   showResults(run: RunState, boss: EncounterScore | null, victory: boolean, handlers: { onRetrySeed(): void; onNewRun(): void }) {
     const all = boss ? [...run.encounterScores, boss] : run.encounterScores;
-    const total = aggregate(all, 'SECTOR 01');
+    const depth = `SECTOR ${String(run.sector).padStart(2, '0')}`;
+    const total = aggregate(all, depth);
     const cls = run.classification;
     const metricRow = (k: MetricKey, label: string, note: string) => {
       const v = total[k];
@@ -271,7 +279,7 @@ export class Screens {
     };
     this.results.innerHTML = `
       <div class="inner">
-        <div class="section-title">${victory ? 'SECTOR 01 CLEARED · SEVERANCE DOWN' : 'FRAME LOST'}</div>
+        <div class="section-title">${victory ? `${depth} CLEARED · DESCENT COMPLETE` : `FRAME LOST · ${depth}`}</div>
         <div class="disc">${cls.name}</div>
         <div class="discSub">${cls.feelsLike.toUpperCase()}${cls.hybrid ? ' · HYBRID' : cls.matchedDiscipline ? ` · ${(cls.dominantShare * 100).toFixed(0)}% ${cls.dominant}` : ''}</div>
         <div class="grid">
@@ -301,6 +309,7 @@ export class Screens {
               <div class="brow mono"><span>ASSISTS</span><b class="${run.assistsAllDefault ? 'assist-none' : 'assist-on'}">${run.assistsAllDefault ? 'NONE · AUTHORED DEFAULTS' : `${activeAssists(run.assists).length} ACTIVE`}</b></div>
               ${activeAssists(run.assists).map((x) => `<div class="brow mono assist"><span>${x.label}</span><b>${x.value}</b></div>`).join('')}
               <div class="brow mono"><span>CHAINS</span><b>${run.chains.map((c) => c.name).join(' → ')}</b></div>
+              <div class="brow mono"><span>DEPTH</span><b>${depth} · ${run.sector} OF ${run.sectorPlan}</b></div>
             </div>
           </div>
         </div>

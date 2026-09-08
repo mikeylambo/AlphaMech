@@ -5,7 +5,7 @@ import { clamp, clamp01, damp, dampAngle } from '../core/MathUtil';
 import { Vitals } from '../frame/Vitals';
 import { Hostile, HostileState, DamageSource } from '../frame/Types';
 import { CombatContext } from '../frame/Context';
-import { Archetype, ATTACKS, AttackId, SHIELD_ADVANCE } from './Archetypes';
+import { Archetype, ATTACKS, AttackId, SHIELD_ADVANCE, HARPOON, SPLIT, SHARD, ARCHETYPE_PALETTES } from './Archetypes';
 import { rigFor, Chassis } from '../entities/RigCache';
 import { MechRig } from '../entities/MechRig';
 import { RigDriver } from '../entities/RigDriver';
@@ -59,9 +59,23 @@ export class Enemy implements Hostile {
   private hitFlash = 0;
   /** Set by upgrades that slow hostile windups (Shared Fault). */
   windupSlow = 1;
+  /**
+   * ECHO SPLIT: an afterimage this frame has been fooled into aiming at. Steering still uses the
+   * real pilot — being fooled is an AIMING error, not a navigation one, which is what makes the
+   * upgrade a survivability tool rather than a crowd-control one.
+   */
+  decoy: THREE.Vector3 | null = null;
+  decoyT = 0;
+  /** ANCHOR DRIVER: pinned to the floor. No movement, no flight. Attacks still resolve. */
+  pinned = 0;
+  /** SINGULARITY ENGINE: an external pull applied for a short window after a nearby stagger. */
+  pull: { to: THREE.Vector3; speed: number; t: number } | null = null;
+  /** SPLITTER: set on the shards so a shard can never split again. */
+  isShard = false;
+  private hasSplit = false;
   /** Behavioural elite modifier, or null. Elites carry no stat inflation (non-negotiable 7). */
   elite: EliteModifier | null = null;
-  private lastGround = 0;
+  protected lastGround = 0;
   protected baseScale = 1;
   /** PREDATOR READ lead-in: the attack is chosen and shown before the windup opens. */
   private leadT = 0;
@@ -80,7 +94,7 @@ export class Enemy implements Hostile {
     this.tokenCooldown = rng.range(0, 1.2);
 
     const chassis: Chassis = spec.chassis === 'standard'
-      ? (spec.id === 'brawler' ? 'brawler' : spec.id === 'lancer' ? 'sniper' : 'standard')
+      ? (spec.id === 'brawler' || spec.id === 'hook' ? 'brawler' : spec.id === 'lancer' ? 'sniper' : 'standard')
       : spec.chassis;
     this.rig = rigFor(chassis, spec.palette);
     this.rig.root.scale.setScalar(spec.scale * (spec.chassis === 'drone' ? 1.6 : 1));
@@ -128,8 +142,15 @@ export class Enemy implements Hostile {
   get glow() { return this.spec.palette.glow; }
   get eye() { return this.pos.clone().setY(this.pos.y + 8); }
 
-  /** Distance to the pressure target, planar. */
+  /** Distance to the pressure target, planar. Never fooled by a decoy: steering is navigation. */
   protected distance() { const d = this.ctx.target.pos.clone().sub(this.pos); d.y = 0; return d.length(); }
+
+  /**
+   * Where this frame BELIEVES the pilot is. Equal to the pilot's position unless an ECHO SPLIT
+   * afterimage has taken this frame's attention. Every telegraph anchor and every strike reads
+   * this; steering reads the real position.
+   */
+  protected aim(): THREE.Vector3 { return this.decoy ?? this.ctx.target.pos; }
 
   releaseToken() {
     if (this.hasAttackToken) { this.hasAttackToken = false; this.tokenCooldown = this.ctx.director.tokenCooldownSeconds; }
@@ -150,7 +171,7 @@ export class Enemy implements Hostile {
     if (!this.alive) return;
     // WARDEN's frontal shield: only a Perfect Vanish punish (Exposed) or a pile driver from
     // above gets through the front. Anything else is stopped cold.
-    if (this.shieldUp && !this.shieldBroken && !this.vitals.isExposed && source !== 'pile') {
+    if (this.shieldUp && !this.shieldBroken && !this.vitals.isExposed && source !== 'pile' && source !== 'breach' && source !== 'phase') {
       const toAttacker = this.ctx.target.pos.clone().sub(this.pos).setY(0).normalize();
       const facing = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
       if (toAttacker.dot(facing) > 0.35) {
@@ -159,10 +180,12 @@ export class Enemy implements Hostile {
         return;
       }
     }
-    if (this.shieldUp && !this.shieldBroken && (source === 'pile' || this.vitals.isExposed)) this.breakShield();
+    // A plate breaks to a Perfect Vanish punish, a driver from above, or BREACH DRIVER — three
+    // routes, all of them acts of piloting rather than sustained damage.
+    if (this.shieldUp && !this.shieldBroken && (source === 'pile' || source === 'breach' || this.vitals.isExposed)) this.breakShield();
 
     const before = this.vitals.staggered;
-    const r = this.vitals.hit(damage, impact, this.ctx.time);
+    const r = this.vitals.hit(damage, impact, this.ctx.time, this.ctx.punish.exposedMult);
     this.hitFlash = 1;
     if (r === 2 && !before) {
       this.state = 'staggered';
@@ -170,6 +193,7 @@ export class Enemy implements Hostile {
       this.ctx.fx.killTelegraph(this.telegraph);
       this.telegraph = null;
       this.currentAttack = null;
+      this.split();
       this.ctx.onHostileStagger(this, source);
     }
     if (!this.alive) this.die();
@@ -183,7 +207,36 @@ export class Enemy implements Hostile {
     this.ctx.audio.stagger();
   }
 
+  /**
+   * SPLITTER. On stagger the frame comes apart into two shards holding their own bearings, so a
+   * hostile you just beat becomes two hostiles you have not — and the encirclement arc widens as
+   * a direct consequence of your own success. Shards never split again.
+   */
+  protected split() {
+    if (this.spec.id !== 'splitter' || this.isShard || this.hasSplit) return;
+    this.hasSplit = true;
+    const side = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+    for (const s of [-1, 1]) {
+      const p = this.pos.clone().addScaledVector(side, s * SPLIT.separation * 0.5);
+      this.ctx.confine(p, 12);
+      p.y = this.ctx.groundAt(p.x, p.z);
+      const shard = new Enemy(SHARD, this.ctx, p);
+      shard.isShard = true;
+      // the shards inherit the moment, not the damage: each opens on its own bearing, unstaggered
+      shard.vel.copy(side).multiplyScalar(s * 34);
+      this.ctx.hostiles.push(shard);
+      this.ctx.fx.ring(p, 2, 22, ARCHETYPE_PALETTES.splitter.glow, 0.45);
+    }
+    this.ctx.fx.impact(this.pos.clone().setY(this.pos.y + 7), ARCHETYPE_PALETTES.splitter.glow, 4, 16);
+    this.ctx.audio.deploy();
+    this.ctx.onHostileSplit?.(this);
+    // the parent is spent: its structure went into the shards
+    this.vitals.structure = 0;
+    this.die();
+  }
+
   die() {
+    if (this.state === 'dead') return;
     this.state = 'dead';
     this.releaseToken();
     this.ctx.fx.killTelegraph(this.telegraph);
@@ -205,6 +258,13 @@ export class Enemy implements Hostile {
     this.spawnFade = Math.max(0, this.spawnFade - dt);
     this.hitFlash = Math.max(0, this.hitFlash - dt * 4);
     this.targetId = 0;
+    this.decoyT = Math.max(0, this.decoyT - dt);
+    if (this.decoyT <= 0) this.decoy = null;
+    this.pinned = Math.max(0, this.pinned - dt);
+    if (this.pull) {
+      this.pull.t -= dt;
+      if (this.pull.t <= 0) this.pull = null;
+    }
 
     if (this.vitals.staggered) {
       this.state = 'staggered';
@@ -228,7 +288,7 @@ export class Enemy implements Hostile {
           const spec = ATTACKS[this.currentAttack];
           // The read tracks you until the attack commits, then locks. That final 0.18s is what
           // makes a ground telegraph honest: late repositioning beats it, not just a vanish.
-          if (spec.kind !== 'mine' && spec.kind !== 'advance' && this.windupRemaining > 0.18) this.telegraph.follow = this.ctx.target.pos;
+          if (spec.kind !== 'mine' && spec.kind !== 'advance' && this.windupRemaining > 0.18) this.telegraph.follow = this.aim();
           else { this.telegraph.follow = null; this.lockedCentre.copy(this.telegraph.mesh.position); this.centreLocked = true; }
         }
         if (this.windupRemaining <= 0) this.strike();
@@ -264,7 +324,7 @@ export class Enemy implements Hostile {
           break;
         }
         if (this.ctx.director.mayOpenAttack(this, this.ctx.hostiles) && this.canOpen(dist)) {
-          if (this.ctx.telegraphLead > 0) this.prepareAttack();
+          if (this.ctx.leadFor(this) > 0) this.prepareAttack();
           else this.beginAttack(this.pickAttack());
         } else this.state = dist > this.band[1] * 1.05 || dist < this.band[0] * 0.95 ? 'approach' : 'orbit';
       }
@@ -272,7 +332,36 @@ export class Enemy implements Hostile {
     this.steer(dt, dist);
   }
 
+  /**
+   * A unit tangential vector pointing away from the nearest OTHER hostile's bearing around the
+   * pilot, or zero when this frame already has the sky to itself. Bearings, not distances: two
+   * frames 200m apart on the same bearing contribute one bearing to the arc, and the arc is the
+   * only thing that buys tokens.
+   */
+  private bearingPush(toTarget: THREE.Vector3): THREE.Vector3 {
+    const p = this.ctx.target.pos;
+    const mine = Math.atan2(this.pos.x - p.x, this.pos.z - p.z);
+    let closest = 0, best = Math.PI;
+    for (const o of this.ctx.hostiles) {
+      if (o === this || !o.alive) continue;
+      const theirs = Math.atan2(o.pos.x - p.x, o.pos.z - p.z);
+      let dd = mine - theirs;
+      while (dd > Math.PI) dd -= Math.PI * 2;
+      while (dd < -Math.PI) dd += Math.PI * 2;
+      if (Math.abs(dd) < best) { best = Math.abs(dd); closest = dd; }
+    }
+    // The push runs all the way out to antipodal. Cutting it off earlier (at 119 degrees) left
+    // the formation settling at a comfortable spacing well short of the arc the downside is
+    // supposed to open: measured +7.4 degrees against a +12 bar. Frames now keep separating
+    // until they are opposite each other, and the strafe and band clamps decide where that
+    // actually lands.
+    const tangent = new THREE.Vector3(-toTarget.z, 0, toTarget.x);
+    const away = closest >= 0 ? 1 : -1;
+    return tangent.multiplyScalar(away * (1 - best / Math.PI));
+  }
+
   protected canOpen(dist: number) {
+    if (!this.ctx.targetable()) return false;
     const spec = this.spec;
     return dist < spec.band[1] * 1.35 && dist > 4;
   }
@@ -302,6 +391,10 @@ export class Enemy implements Hostile {
       // The forward bias is what turns orbiting into encirclement pressure. FLANK DEBT and the
       // FALL ladder both raise it; neither can touch how many tokens exist.
       wish.addScaledVector(d, this.ctx.director.forwardBias);
+      // FLANK DEBT: push apart in BEARING, so the formation occupies a wider span around the
+      // pilot. Tangential only — this moves where a frame stands, never what it is allowed to do.
+      const sep = this.ctx.director.bearingSeparation;
+      if (sep > 0) wish.addScaledVector(this.bearingPush(d), sep);
       // ANCHOR elites pull the rest of the formation onto themselves, so the arc will not close
       // until the anchor is dealt with.
       const anchor = this.ctx.hostiles.find((h) => h !== this && h.alive && (h as Enemy).elite?.cohesion);
@@ -309,6 +402,29 @@ export class Enemy implements Hostile {
         const toAnchor = anchor.pos.clone().sub(this.pos).setY(0);
         if (toAnchor.lengthSq() > 1) wish.addScaledVector(toAnchor.normalize(), (anchor as Enemy).elite!.cohesion);
       }
+    }
+
+    // ANCHOR DRIVER: pinned means pinned. The frame still swings, it just cannot leave.
+    if (this.pinned > 0) {
+      this.vel.set(0, 0, 0);
+      const g = this.ctx.groundAt(this.pos.x, this.pos.z);
+      this.lastGround = g;
+      if (this.pos.y > g + 0.2) this.vel.y = -T.gravity * 2;   // pinned means pinned to the FLOOR
+      this.yaw = dampAngle(this.yaw, Math.atan2(toTarget.x, toTarget.z), 5, dt);
+      return;
+    }
+    // SINGULARITY ENGINE: an external pull toward the frame that just broke.
+    if (this.pull) {
+      const to = this.pull.to.clone().sub(this.pos).setY(0);
+      if (to.lengthSq() > 1) {
+        to.normalize().multiplyScalar(this.pull.speed);
+        this.vel.x = to.x; this.vel.z = to.z;
+      }
+      const g = this.ctx.groundAt(this.pos.x, this.pos.z);
+      this.lastGround = g;
+      if (!this.spec.flying) this.vel.y = this.pos.y > g + 0.2 ? this.vel.y - T.gravity * dt : 0;
+      this.yaw = dampAngle(this.yaw, Math.atan2(toTarget.x, toTarget.z), 6, dt);
+      return;
     }
 
     if (this.ctx.confine(this.pos.clone(), 0)) {
@@ -360,10 +476,10 @@ export class Enemy implements Hostile {
   /** PREDATOR READ only: commit to the attack early and show a faint precursor ring. */
   private prepareAttack() {
     this.pending = this.pickAttack();
-    this.leadT = this.ctx.telegraphLead;
+    this.leadT = this.ctx.leadFor(this);
     const spec = ATTACKS[this.pending];
-    const anchor = spec.kind === 'mine' || spec.kind === 'advance' ? this.pos : this.ctx.target.pos;
-    this.telegraph = this.ctx.fx.telegraph(anchor, spec.telegraph * 0.85, this.glow, this.leadT, false, spec.kind === 'mine' || spec.kind === 'advance' ? null : this.ctx.target.pos);
+    const anchor = spec.kind === 'mine' || spec.kind === 'advance' ? this.pos : this.aim();
+    this.telegraph = this.ctx.fx.telegraph(anchor, spec.telegraph * 0.85, this.glow, this.leadT, false, spec.kind === 'mine' || spec.kind === 'advance' ? null : this.aim());
   }
 
   protected beginAttack(id: AttackId) {
@@ -375,7 +491,7 @@ export class Enemy implements Hostile {
     this.windupRemaining = this.windupMax = spec.windup;
     this.recoverT = spec.recovery;
 
-    const anchor = spec.kind === 'mine' ? this.pos : spec.kind === 'advance' ? this.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), SHIELD_ADVANCE.distance * 0.5) : this.ctx.target.pos;
+    const anchor = spec.kind === 'mine' ? this.pos : spec.kind === 'advance' ? this.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), SHIELD_ADVANCE.distance * 0.5) : this.aim();
     this.telegraph = this.ctx.fx.telegraph(anchor, spec.telegraph, this.glow, spec.windup, id === 'quake');
     this.ctx.audio.windup(spec.windup);
     this.ctx.onHostileWindupStart(this);
@@ -397,7 +513,8 @@ export class Enemy implements Hostile {
     this.state = 'strike';
     this.beamT = 0.24;
     const from = this.eye;
-    const to = this.ctx.target.pos.clone().setY(this.ctx.target.pos.y + 8);
+    const believed = this.aim();
+    const to = believed.clone().setY(believed.y + 8);
     const c = this.glow;
     const withinTelegraph = () => this.ctx.target.pos.distanceTo(this.telegraphCentre(id)) < spec.telegraph + 4;
 
@@ -423,7 +540,7 @@ export class Enemy implements Hostile {
       }
       case 'lunge': {
         this.ctx.fx.ghost(this.rig.root, c, 0.35);
-        const dir = this.ctx.target.pos.clone().sub(this.pos).setY(0).normalize();
+        const dir = believed.clone().sub(this.pos).setY(0).normalize();
         const gap = Math.max(0, this.distance() - 13);
         this.pos.addScaledVector(dir, gap);
         this.ctx.fx.impact(to, c, 3.4, 10);
@@ -483,6 +600,51 @@ export class Enemy implements Hostile {
         this.beamT = 99; // ends when the advance completes
         break;
       }
+      /**
+       * SCATTER — SPLITTER's short-range fan. Six rounds across a wide cone: individually weak,
+       * collectively a wall, and completely outrunnable sideways. It is the attack that makes
+       * a SPLITTER's band worth respecting before you break it in half.
+       */
+      case 'scatter': {
+        for (let k = 0; k < 6; k++) {
+          const spread = (k - 2.5) * 0.085;
+          const dir = to.clone().sub(from).normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), spread);
+          this.ctx.ordnance.spawnBolt({ pos: from, vel: dir.multiplyScalar(190), damage: spec.damage / 6, impact: spec.impact / 6, hostile: true, colour: c, radius: 3.4, source: this, attack: id, life: 1.5 });
+        }
+        this.ctx.audio.enemyShot();
+        this.beamT = 0.16;
+        break;
+      }
+      /**
+       * HARPOON — HOOK's whole identity. It does not out-damage you, it relocates you: 30m
+       * toward the frame that fired it, which is very often back into the middle of the
+       * formation you had just broken out of. The telegraph is a tight 11m ring, so it is
+       * readable and vanishable like everything else; what it costs you is position.
+       */
+      case 'harpoon': {
+        this.ctx.fx.tracer(from, to, c, 1.6, 0.35);
+        this.ctx.audio.deploy();
+        if (withinTelegraph()) {
+          this.hitTarget(id);
+          const dir = this.pos.clone().sub(this.ctx.target.pos).setY(0);
+          if (dir.lengthSq() > 1) this.ctx.target.applyPull(dir.normalize(), HARPOON.pull);
+          this.ctx.fx.ring(this.ctx.target.pos, 3, 20, c, 0.4);
+          this.ctx.shake(0.5);
+        }
+        this.beamT = 0.28;
+        break;
+      }
+      /** POUR — KILNWORKS. Molten line along the casting run; the read is the floor, as always. */
+      case 'pour': {
+        const centre = this.telegraphCentre(id).clone();
+        this.ctx.fx.ring(centre, 4, spec.telegraph, c, 0.7);
+        this.ctx.fx.impact(centre.clone().setY(centre.y + 3), c, 6, 24);
+        this.ctx.audio.explosion(1.1);
+        this.ctx.shake(0.7);
+        if (withinTelegraph() && this.ctx.target.pos.y < centre.y + 24) this.hitTarget(id);
+        this.beamT = 0.34;
+        break;
+      }
       case 'quake': {
         const centre = this.pos.clone();
         this.ctx.fx.ring(centre, 4, spec.telegraph, c, 0.6);
@@ -502,7 +664,7 @@ export class Enemy implements Hostile {
     if (this.centreLocked && spec.kind !== 'mine' && spec.kind !== 'advance') return this.lockedCentre;
     if (spec.kind === 'mine') return this.pos;
     if (spec.kind === 'advance') return this.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), SHIELD_ADVANCE.distance * 0.5);
-    return this.ctx.target.pos;
+    return this.aim();
   }
 
   // ------------------------------------------------------------------------------ presentation

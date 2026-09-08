@@ -13,9 +13,10 @@ import { RunState } from '../build/RunState';
 import { REACTORS } from '../build/Reactors';
 import { UPGRADE_VALUES } from '../build/Upgrades';
 import { CORRUPTED_VALUES, DOWNSIDE_VALUES } from '../build/Corrupted';
-import { HardpointId } from '../build/Weapons';
-import { EVOLUTION_VALUES } from '../build/Weapons';
+import { HardpointId, EVOLUTION_VALUES } from '../build/Weapons';
 import { InputManager } from '../core/Input';
+import { RNG } from '../core/RNG';
+import { ATTACKS, AttackId } from '../enemies/Archetypes';
 import { settings } from '../core/Settings';
 
 /** The player's saturated, additive palette — the only high-value silhouette on screen. */
@@ -25,9 +26,18 @@ export const PLAYER_PAL: MechPalette = {
 };
 export const PLAYER_GLOW = 0x8ff4ff;
 
+/** Seconds a hard lock survives a line-of-sight break without GHOST LOCK. */
+const LOS_GRACE = 0.45;
+
 export type PlayerStateLabel = 'STANDBY' | 'BOOST SKATE' | 'QUICK BOOST' | 'ASSAULT BOOST' | 'VERTICAL THRUST' | 'DESCENT' | 'AIRBORNE' | 'STAGGERED' | 'VANISH';
 
-/** Modifiers derived from the reactor, upgrades and weapon evolutions. */
+/**
+ * Modifiers derived from the reactor, upgrades and weapon evolutions.
+ *
+ * Every magnitude here is read from UPGRADE_VALUES / CORRUPTED_VALUES / EVOLUTION_VALUES, which
+ * are the same constants the FORGE card prints. There is no second copy of any number: if a card
+ * says 45 m/s, the simulation reads the field the card rendered.
+ */
 export interface BuildMods {
   structure: number;
   /** Energy ceiling. Lowered by the EN CEILING corrupted downside. */
@@ -53,6 +63,53 @@ export interface BuildMods {
   bladeImpact: number;
   pileCooldown: number;
   impactNeverDecays: boolean;
+  /** BREAKER moves this. Every other chassis skates at the baseline. */
+  boostSpeed: number;
+  /** PUNISH DOCTRINE trades magnitude for duration on the Exposed window. */
+  exposedMult: number;
+  exposedDuration: number;
+
+  // --- BOOST ---
+  gravityThrusters: boolean;
+  gtRadius: number; gtDeflection: number; gtDuration: number;
+  contrailWeave: boolean;
+  contrailLife: number; contrailDamage: number; contrailImpact: number; contrailWidth: number;
+  overburn: boolean;
+  overburnFree: number; overburnLockout: number;
+  groundEffect: boolean;
+  geRate: number; geDamage: number; geImpact: number; geRadius: number;
+  kineticBank: boolean;
+  kbShare: number; kbMax: number; kbDamage: number; kbImpact: number; kbRange: number;
+
+  // --- VANISH ---
+  echoSplit: boolean;
+  echoCount: number; echoDuration: number; echoRetarget: number;
+  cascade: boolean;
+  cascadeWindow: number; cascadeStep: number; cascadeMax: number;
+  counterweight: boolean;
+  counterweightRadius: number;
+  blindAngle: boolean;
+  blindAngleDuration: number;
+  impactReflection: boolean;
+  reflectionShare: number;
+
+  // --- LOCK ---
+  sensorBloom: boolean;
+  bloomLead: number; bloomCooldown: number;
+  ghostLock: boolean;
+  ghostPersist: number;
+  targetDebt: boolean;
+  debtRate: number; debtMax: number;
+
+  // --- STAGGER ---
+  singularity: boolean;
+  singRadius: number; singSpeed: number; singDuration: number;
+  overpressure: boolean;
+  overpressureHold: number;
+  sharedFault: boolean;
+  sfRadius: number; sfSlow: number;
+  faultLine: boolean;
+  flRadius: number; flTargets: number;
   // corrupted-scalable magnitudes
   railCoreBonus: number;
   slipstreamDur: number;
@@ -66,11 +123,19 @@ export interface BuildMods {
   cascadeShare: number;
   bleedEnergy: number;
   bleedLife: number;
-  // evolutions
+  // --- evolutions, twelve tier-1 branches ---
+  phaseBlade: boolean;
   tetherBlade: boolean;
+  executionBlade: boolean;
+  ricochetRifle: boolean;
+  lockSplittingRifle: boolean;
   momentumRailgun: boolean;
   orbitingInterceptors: boolean;
+  mineLattice: boolean;
+  swarmLock: boolean;
   seismicDriver: boolean;
+  anchorDriver: boolean;
+  breachDriver: boolean;
 }
 
 export function defaultMods(): BuildMods {
@@ -81,6 +146,24 @@ export function defaultMods(): BuildMods {
     railCore: false, slipstream: false, splitLock: false, weightOfAttention: false, chainRead: false,
     executionProtocol: false, cascadeBreak: false, reactorBleed: false, telegraphLead: 0,
     bladeImpact: T.bladeImpact, pileCooldown: T.pileCooldown, impactNeverDecays: false,
+    boostSpeed: T.speed, exposedMult: T.exposedMult, exposedDuration: T.exposedDur,
+    gravityThrusters: false, gtRadius: UPGRADE_VALUES.gravityThrustersRadius, gtDeflection: UPGRADE_VALUES.gravityThrustersDeflection, gtDuration: UPGRADE_VALUES.gravityThrustersDuration,
+    contrailWeave: false, contrailLife: UPGRADE_VALUES.contrailLife, contrailDamage: UPGRADE_VALUES.contrailDamagePerSec, contrailImpact: UPGRADE_VALUES.contrailImpactPerSec, contrailWidth: UPGRADE_VALUES.contrailWidth,
+    overburn: false, overburnFree: UPGRADE_VALUES.overburnFreeSeconds, overburnLockout: UPGRADE_VALUES.overburnLockout,
+    groundEffect: false, geRate: UPGRADE_VALUES.groundEffectRate, geDamage: UPGRADE_VALUES.groundEffectDamagePerCharge, geImpact: UPGRADE_VALUES.groundEffectImpactPerCharge, geRadius: UPGRADE_VALUES.groundEffectRadius,
+    kineticBank: false, kbShare: UPGRADE_VALUES.kineticBankShare, kbMax: UPGRADE_VALUES.kineticBankMax, kbDamage: UPGRADE_VALUES.kineticBankDamagePerPoint, kbImpact: UPGRADE_VALUES.kineticBankImpactPerPoint, kbRange: UPGRADE_VALUES.kineticBankConeRange,
+    echoSplit: false, echoCount: UPGRADE_VALUES.echoSplitCount, echoDuration: UPGRADE_VALUES.echoSplitDuration, echoRetarget: UPGRADE_VALUES.echoSplitRetargetChance,
+    cascade: false, cascadeWindow: UPGRADE_VALUES.cascadeWindow, cascadeStep: UPGRADE_VALUES.cascadeStep, cascadeMax: UPGRADE_VALUES.cascadeMax,
+    counterweight: false, counterweightRadius: UPGRADE_VALUES.counterweightRadius,
+    blindAngle: false, blindAngleDuration: UPGRADE_VALUES.blindAngleDuration,
+    impactReflection: false, reflectionShare: UPGRADE_VALUES.impactReflectionShare,
+    sensorBloom: false, bloomLead: UPGRADE_VALUES.sensorBloomLead, bloomCooldown: UPGRADE_VALUES.sensorBloomCooldown,
+    ghostLock: false, ghostPersist: UPGRADE_VALUES.ghostLockPersist,
+    targetDebt: false, debtRate: UPGRADE_VALUES.targetDebtRate, debtMax: UPGRADE_VALUES.targetDebtMax,
+    singularity: false, singRadius: UPGRADE_VALUES.singularityRadius, singSpeed: UPGRADE_VALUES.singularitySpeed, singDuration: UPGRADE_VALUES.singularityDuration,
+    overpressure: false, overpressureHold: UPGRADE_VALUES.overpressureHold,
+    sharedFault: false, sfRadius: UPGRADE_VALUES.sharedFaultRadius, sfSlow: UPGRADE_VALUES.sharedFaultSlow,
+    faultLine: false, flRadius: UPGRADE_VALUES.faultLineRadius, flTargets: 1,
     railCoreBonus: UPGRADE_VALUES.railCoreMaxBonus,
     slipstreamDur: UPGRADE_VALUES.slipstreamDuration,
     slipstreamStacksMax: UPGRADE_VALUES.slipstreamMaxStacks,
@@ -93,7 +176,10 @@ export function defaultMods(): BuildMods {
     cascadeShare: UPGRADE_VALUES.cascadeBreakShare,
     bleedEnergy: UPGRADE_VALUES.reactorBleedEnergy,
     bleedLife: UPGRADE_VALUES.reactorBleedLife,
-    tetherBlade: false, momentumRailgun: false, orbitingInterceptors: false, seismicDriver: false,
+    phaseBlade: false, tetherBlade: false, executionBlade: false,
+    ricochetRifle: false, lockSplittingRifle: false, momentumRailgun: false,
+    orbitingInterceptors: false, mineLattice: false, swarmLock: false,
+    seismicDriver: false, anchorDriver: false, breachDriver: false,
   };
 }
 
@@ -143,6 +229,35 @@ export class Player implements PressureTarget {
   private lastVanishAt = -99;
   private railgunCharge = 0;
   private railgunCharging = false;
+  // --- v0.3 upgrade state ---
+  /** GROUND EFFECT charge, 0..100. */
+  groundCharge = 0;
+  /** KINETIC BANK, 0..kbMax. */
+  bank = 0;
+  private overburnT = 0;
+  private overburnLock = 0;
+  private wasAssault = false;
+  /** BLIND ANGLE: seconds remaining of untargetability. */
+  blindT = 0;
+  /**
+   * TARGET DEBT: seconds the current lock has been held, and the frame it is being held on.
+   *
+   * This tracks the OBJECT, not its id. Hostile ids restart at 1 on every encounter, so an
+   * id-keyed comparison silently treats "the fourth frame of this fight" and "the fourth frame
+   * of the last one" as the same lock — which leaked both the debt accrual and the
+   * line-of-sight grace across encounter and run boundaries, and could drop a freshly acquired
+   * lock on its first frame. Identity cannot be recycled; an integer can.
+   */
+  private debtT = 0;
+  private debtLock: Hostile | null = null;
+  /** SENSOR BLOOM: cooldown after a lock change, during which the reveal is suppressed. */
+  private bloomCD = 0;
+  /** CASCADE: bullet-time extension earned by consecutive reads. */
+  private cascadeBonus = 0;
+  /** GHOST LOCK: seconds a hard lock may survive without line of sight. */
+  private lostSightT = 0;
+  private trailPrev: THREE.Vector3 | null = null;
+  private trailT = 0;
 
   // --- weapon timers ---
   private fireCD = 0;
@@ -170,6 +285,24 @@ export class Player implements PressureTarget {
   get speed() { return Math.hypot(this.vel.x, this.vel.z); }
   get energy01() { return this.energy / this.mods.energyMax; }
   get altitude() { return this.pos.y - this.ctx.groundAt(this.pos.x, this.pos.z); }
+
+  /**
+   * HOOK's harpoon, and the only channel through which a hostile may move the pilot.
+   *
+   * It is a translation, not a teleport: the frame is dragged along the ground plane and the
+   * move is confined like any other, so it cannot put you inside geometry. What it costs you is
+   * the position you had just earned — which is the whole point of the archetype.
+   */
+  applyPull(dir: THREE.Vector3, distance: number) {
+    if (!this.vitals.alive) return;
+    const dest = this.pos.clone().addScaledVector(dir, distance);
+    dest.y = Math.max(this.ctx.groundAt(dest.x, dest.z), this.pos.y - 6);
+    this.ctx.confine(dest, 4);
+    this.ctx.fx.trailQuad(this.pos.clone().setY(this.pos.y + 6), dest.clone().setY(dest.y + 6), 2.4, 0xff7ae0, 0.35);
+    this.pos.copy(dest);
+    this.vel.multiplyScalar(0.25);
+    this.events.onFlash('HOOKED', '#ff7ae0');
+  }
 
   receiveHit(damage: number, impact: number, from: Hostile | null, attack: string) {
     if (T.godMode || this.invuln > 0 || !this.vitals.alive) return;
@@ -204,6 +337,7 @@ export class Player implements PressureTarget {
     m.pileCooldown = reactor.pileCooldown;
     m.bladeImpact = reactor.bladeImpact;
     m.impactNeverDecays = reactor.impactNeverDecays;
+    m.boostSpeed = reactor.boostSpeed;
 
     // Corrupted variants amplify the upgrade's own identity and carry exactly one downside.
     const corrupt = new Set(run.corrupted.map((c) => c.upgrade));
@@ -222,13 +356,125 @@ export class Player implements PressureTarget {
         case 'execution-protocol': m.executionProtocol = true; m.executionMult = C ? CORRUPTED_VALUES.executionBladeMult : UPGRADE_VALUES.executionBladeMult; break;
         case 'cascade-break': m.cascadeBreak = true; m.cascadeShare = C ? CORRUPTED_VALUES.cascadeBreakShare : UPGRADE_VALUES.cascadeBreakShare; break;
         case 'reactor-bleed': m.reactorBleed = true; m.bleedEnergy = C ? CORRUPTED_VALUES.reactorBleedEnergy : UPGRADE_VALUES.reactorBleedEnergy; m.bleedLife = C ? CORRUPTED_VALUES.reactorBleedLife : UPGRADE_VALUES.reactorBleedLife; break;
+
+        // ---------------------------------------------------------------- v0.3 BOOST
+        case 'gravity-thrusters':
+          m.gravityThrusters = true;
+          m.gtRadius = C ? CORRUPTED_VALUES.gravityThrustersRadius : UPGRADE_VALUES.gravityThrustersRadius;
+          m.gtDeflection = C ? CORRUPTED_VALUES.gravityThrustersDeflection : UPGRADE_VALUES.gravityThrustersDeflection;
+          m.gtDuration = C ? CORRUPTED_VALUES.gravityThrustersDuration : UPGRADE_VALUES.gravityThrustersDuration;
+          break;
+        case 'contrail-weave':
+          m.contrailWeave = true;
+          m.contrailLife = C ? CORRUPTED_VALUES.contrailLife : UPGRADE_VALUES.contrailLife;
+          m.contrailDamage = C ? CORRUPTED_VALUES.contrailDamagePerSec : UPGRADE_VALUES.contrailDamagePerSec;
+          m.contrailImpact = C ? CORRUPTED_VALUES.contrailImpactPerSec : UPGRADE_VALUES.contrailImpactPerSec;
+          m.contrailWidth = C ? CORRUPTED_VALUES.contrailWidth : UPGRADE_VALUES.contrailWidth;
+          break;
+        case 'overburn':
+          m.overburn = true;
+          m.overburnFree = C ? CORRUPTED_VALUES.overburnFreeSeconds : UPGRADE_VALUES.overburnFreeSeconds;
+          m.overburnLockout = C ? CORRUPTED_VALUES.overburnLockout : UPGRADE_VALUES.overburnLockout;
+          break;
+        case 'ground-effect':
+          m.groundEffect = true;
+          m.geRate = C ? CORRUPTED_VALUES.groundEffectRate : UPGRADE_VALUES.groundEffectRate;
+          m.geDamage = C ? CORRUPTED_VALUES.groundEffectDamagePerCharge : UPGRADE_VALUES.groundEffectDamagePerCharge;
+          m.geImpact = C ? CORRUPTED_VALUES.groundEffectImpactPerCharge : UPGRADE_VALUES.groundEffectImpactPerCharge;
+          m.geRadius = C ? CORRUPTED_VALUES.groundEffectRadius : UPGRADE_VALUES.groundEffectRadius;
+          break;
+        case 'kinetic-bank':
+          m.kineticBank = true;
+          m.kbShare = C ? CORRUPTED_VALUES.kineticBankShare : UPGRADE_VALUES.kineticBankShare;
+          m.kbMax = C ? CORRUPTED_VALUES.kineticBankMax : UPGRADE_VALUES.kineticBankMax;
+          m.kbDamage = C ? CORRUPTED_VALUES.kineticBankDamagePerPoint : UPGRADE_VALUES.kineticBankDamagePerPoint;
+          m.kbImpact = C ? CORRUPTED_VALUES.kineticBankImpactPerPoint : UPGRADE_VALUES.kineticBankImpactPerPoint;
+          break;
+
+        // -------------------------------------------------------------- v0.3 VANISH
+        case 'echo-split':
+          m.echoSplit = true;
+          m.echoCount = C ? CORRUPTED_VALUES.echoSplitCount : UPGRADE_VALUES.echoSplitCount;
+          m.echoDuration = C ? CORRUPTED_VALUES.echoSplitDuration : UPGRADE_VALUES.echoSplitDuration;
+          m.echoRetarget = C ? CORRUPTED_VALUES.echoSplitRetargetChance : UPGRADE_VALUES.echoSplitRetargetChance;
+          break;
+        case 'cascade':
+          m.cascade = true;
+          m.cascadeWindow = C ? CORRUPTED_VALUES.cascadeWindow : UPGRADE_VALUES.cascadeWindow;
+          m.cascadeStep = C ? CORRUPTED_VALUES.cascadeStep : UPGRADE_VALUES.cascadeStep;
+          m.cascadeMax = C ? CORRUPTED_VALUES.cascadeMax : UPGRADE_VALUES.cascadeMax;
+          break;
+        case 'punish-doctrine':
+          m.exposedMult = C ? CORRUPTED_VALUES.punishExposedMult : UPGRADE_VALUES.punishExposedMult;
+          m.exposedDuration = C ? CORRUPTED_VALUES.punishExposedDuration : UPGRADE_VALUES.punishExposedDuration;
+          break;
+        case 'counterweight':
+          m.counterweight = true;
+          m.counterweightRadius = C ? CORRUPTED_VALUES.counterweightRadius : UPGRADE_VALUES.counterweightRadius;
+          break;
+        case 'blind-angle':
+          m.blindAngle = true;
+          m.blindAngleDuration = C ? CORRUPTED_VALUES.blindAngleDuration : UPGRADE_VALUES.blindAngleDuration;
+          break;
+        case 'impact-reflection':
+          m.impactReflection = true;
+          m.reflectionShare = C ? CORRUPTED_VALUES.impactReflectionShare : UPGRADE_VALUES.impactReflectionShare;
+          break;
+
+        // ---------------------------------------------------------------- v0.3 LOCK
+        case 'sensor-bloom':
+          m.sensorBloom = true;
+          m.bloomLead = C ? CORRUPTED_VALUES.sensorBloomLead : UPGRADE_VALUES.sensorBloomLead;
+          m.bloomCooldown = C ? CORRUPTED_VALUES.sensorBloomCooldown : UPGRADE_VALUES.sensorBloomCooldown;
+          break;
+        case 'ghost-lock':
+          m.ghostLock = true;
+          m.ghostPersist = C ? CORRUPTED_VALUES.ghostLockPersist : UPGRADE_VALUES.ghostLockPersist;
+          break;
+        case 'target-debt':
+          m.targetDebt = true;
+          m.debtRate = C ? CORRUPTED_VALUES.targetDebtRate : UPGRADE_VALUES.targetDebtRate;
+          m.debtMax = C ? CORRUPTED_VALUES.targetDebtMax : UPGRADE_VALUES.targetDebtMax;
+          break;
+
+        // ------------------------------------------------------------- v0.3 STAGGER
+        case 'singularity-engine':
+          m.singularity = true;
+          m.singRadius = C ? CORRUPTED_VALUES.singularityRadius : UPGRADE_VALUES.singularityRadius;
+          m.singSpeed = C ? CORRUPTED_VALUES.singularitySpeed : UPGRADE_VALUES.singularitySpeed;
+          m.singDuration = C ? CORRUPTED_VALUES.singularityDuration : UPGRADE_VALUES.singularityDuration;
+          break;
+        case 'overpressure':
+          m.overpressure = true;
+          m.overpressureHold = C ? CORRUPTED_VALUES.overpressureHold : UPGRADE_VALUES.overpressureHold;
+          break;
+        case 'shared-fault':
+          m.sharedFault = true;
+          m.sfRadius = C ? CORRUPTED_VALUES.sharedFaultRadius : UPGRADE_VALUES.sharedFaultRadius;
+          m.sfSlow = C ? CORRUPTED_VALUES.sharedFaultSlow : UPGRADE_VALUES.sharedFaultSlow;
+          break;
+        case 'fault-line':
+          m.faultLine = true;
+          m.flRadius = C ? CORRUPTED_VALUES.faultLineRadius : UPGRADE_VALUES.faultLineRadius;
+          m.flTargets = C ? CORRUPTED_VALUES.faultLineTargets : 1;
+          break;
       }
     }
     for (const e of run.evolutions) {
-      if (e === 'tether-blade') m.tetherBlade = true;
-      if (e === 'momentum-railgun') m.momentumRailgun = true;
-      if (e === 'orbiting-interceptors') m.orbitingInterceptors = true;
-      if (e === 'seismic-driver') m.seismicDriver = true;
+      switch (e) {
+        case 'phase-blade': m.phaseBlade = true; break;
+        case 'tether-blade': m.tetherBlade = true; break;
+        case 'execution-blade': m.executionBlade = true; break;
+        case 'ricochet-rifle': m.ricochetRifle = true; break;
+        case 'lock-splitting-rifle': m.lockSplittingRifle = true; break;
+        case 'momentum-railgun': m.momentumRailgun = true; break;
+        case 'orbiting-interceptors': m.orbitingInterceptors = true; break;
+        case 'mine-lattice': m.mineLattice = true; break;
+        case 'swarm-lock': m.swarmLock = true; break;
+        case 'seismic-driver': m.seismicDriver = true; break;
+        case 'anchor-driver': m.anchorDriver = true; break;
+        case 'breach-driver': m.breachDriver = true; break;
+      }
     }
     // ---- corrupted downsides: exactly one per corrupted card taken ----
     this.ctx.director.flankDebt = false;
@@ -244,15 +490,25 @@ export class Player implements PressureTarget {
 
     this.mods = m;
     this.lock.capacity = m.splitLock ? m.lockCapacity : 1;
-    this.vitals.noDecay = m.impactNeverDecays;
+    /**
+     * BREAKER reads "YOUR impact never decays" — the impact you DEAL, on the frames you deal it
+     * to. It was being applied to the pilot's own impact bar, which is the opposite of the card:
+     * it made the chassis easier to stagger and did nothing at all to the fight. The flag now
+     * travels with the damage (see dealDamage) and the pilot's own bar behaves normally.
+     */
+    this.vitals.noDecay = false;
     this.ctx.ordnance.setInterceptors(m.orbitingInterceptors ? EVOLUTION_VALUES.interceptorCount : 0, PLAYER_GLOW);
+    // the punish window belongs to the build, and the whole simulation reads it from one place
+    this.ctx.punish.exposedMult = m.exposedMult;
+    this.ctx.punish.exposedDuration = m.exposedDuration;
   }
 
   resetForEncounter(keepStructure = true) {
     const s = keepStructure ? this.vitals.structure : this.mods.structure;
     this.vitals.reset(this.mods.structure);
     this.vitals.structure = Math.min(this.mods.structure, s);
-    this.vitals.noDecay = this.mods.impactNeverDecays;
+    // the pilot's own impact bar always decays; BREAKER's rule is about the impact you DEAL
+    this.vitals.noDecay = false;
     this.energy = this.mods.energyMax;
     this.vel.set(0, 0, 0);
     this.assault = false;
@@ -266,6 +522,9 @@ export class Player implements PressureTarget {
     this.grounded = true; this.pitch = -0.06; this.state = 'STANDBY';
     this.slipstreamStacks = 0; this.slipstreamT = 0; this.missileQueue = 0; this.missileT = 0;
     this.regenT = 0; this.lastVanishAt = -99; this.frozen = false;
+    this.groundCharge = 0; this.bank = 0; this.overburnT = 0; this.overburnLock = 0; this.wasAssault = false;
+    this.blindT = 0; this.debtT = 0; this.debtLock = null; this.bloomCD = 0; this.cascadeBonus = 0;
+    this.lostSightT = 0; this.trailPrev = null; this.trailT = 0;
     this.driver = new RigDriver(this.rig);
   }
 
@@ -288,7 +547,11 @@ export class Player implements PressureTarget {
     this.invuln = Math.max(0, this.invuln - dt);
     this.slipstreamT = Math.max(0, this.slipstreamT - dt);
     if (this.slipstreamT <= 0) this.slipstreamStacks = 0;
+    this.blindT = Math.max(0, this.blindT - dt);
+    this.overburnLock = Math.max(0, this.overburnLock - dt);
+    this.bloomCD = Math.max(0, this.bloomCD - dt);
     this.lock.prune();
+    this.tickLockHold(dt);
 
     if (this.frozen) { this.present(dt); return; }
 
@@ -302,9 +565,17 @@ export class Player implements PressureTarget {
 
     // ASSAULT BOOST is a toggle by default; the hold-to-toggle assist converts it for players
     // who cannot comfortably hold a modifier for a whole encounter.
-    if (settings.assists.holdAssaultBoost) this.assault = canAct && input.held('assault') && this.energy > 1 && !V.staggered;
-    else if (canAct && input.pressed('assault') && this.energy > 5 && !V.staggered) this.assault = !this.assault;
+    const overburnBlocked = this.mods.overburn && this.overburnLock > 0;
+    if (settings.assists.holdAssaultBoost) this.assault = canAct && input.held('assault') && this.energy > 1 && !V.staggered && !overburnBlocked;
+    else if (canAct && input.pressed('assault') && this.energy > 5 && !V.staggered && !overburnBlocked) this.assault = !this.assault;
     if (this.energy < 1 || V.staggered) this.assault = false;
+    // OVERBURN: each ACTIVATION gets its free window, and pays a lockout when it ends.
+    if (this.mods.overburn) {
+      if (this.assault && !this.wasAssault) this.overburnT = this.mods.overburnFree;
+      if (!this.assault && this.wasAssault) this.overburnLock = this.mods.overburnLockout;
+      if (this.assault) this.overburnT = Math.max(0, this.overburnT - dt);
+    }
+    this.wasAssault = this.assault;
     if (canAct && input.pressed('vanish')) this.tryVanish(wish);
 
     // ---- horizontal ----
@@ -319,13 +590,15 @@ export class Player implements PressureTarget {
       const d = f.clone().multiplyScalar(iz < 0 ? -1 : 1).addScaledVector(r, ix).normalize().multiplyScalar(T.assaultSpeed);
       this.vel.x = damp(this.vel.x, d.x, T.assaultAccel * accelBoost, dt);
       this.vel.z = damp(this.vel.z, d.z, T.assaultAccel * accelBoost, dt);
-      this.energy -= dt * T.assaultDrain;
+      const free = this.mods.overburn && this.overburnT > 0;
+      if (!free) this.spendMovementEnergy(dt * T.assaultDrain);
       consuming = true;
       this.state = 'ASSAULT BOOST';
     } else {
       const sc = V.staggered ? 0.15 : 1;
-      this.vel.x = damp(this.vel.x, wish.x * T.speed * sc, T.accel * accelBoost, dt);
-      this.vel.z = damp(this.vel.z, wish.z * T.speed * sc, T.accel * accelBoost, dt);
+      const cruise = this.mods.boostSpeed;
+      this.vel.x = damp(this.vel.x, wish.x * cruise * sc, T.accel * accelBoost, dt);
+      this.vel.z = damp(this.vel.z, wish.z * cruise * sc, T.accel * accelBoost, dt);
       this.state = V.staggered ? 'STAGGERED' : this.grounded ? (wish.lengthSq() > 0.01 ? 'BOOST SKATE' : 'STANDBY') : 'AIRBORNE';
     }
 
@@ -340,7 +613,7 @@ export class Player implements PressureTarget {
       this.state = 'DESCENT';
     } else if (rise && this.energy > 0) {
       this.vel.y = damp(this.vel.y, T.thrust, 6, dt);
-      if (!this.assault) this.energy -= dt * T.hoverCost;
+      if (!this.assault) this.spendMovementEnergy(dt * T.hoverCost);
       consuming = true;
       this.grounded = false;
       this.state = 'VERTICAL THRUST';
@@ -372,6 +645,28 @@ export class Player implements PressureTarget {
     }
     if (this.pos.y > g + T.ceiling) { this.pos.y = g + T.ceiling; this.vel.y = Math.min(0, this.vel.y); }
     this.ctx.confine(this.pos, 0);
+
+    // ---- GROUND EFFECT: skate low, land loud ----
+    if (this.mods.groundEffect) {
+      if (this.altitude < UPGRADE_VALUES.groundEffectAltitude && this.speed > 20) {
+        this.groundCharge = Math.min(UPGRADE_VALUES.groundEffectMax, this.groundCharge + this.mods.geRate * dt);
+      }
+    }
+
+    // ---- CONTRAIL WEAVE: the line you leave behind is solid ----
+    if (this.mods.contrailWeave) {
+      this.trailT -= dt;
+      const moving = this.speed > 40;
+      if (!moving) this.trailPrev = null;
+      else if (this.trailT <= 0) {
+        this.trailT = 0.06;
+        const here = this.pos.clone().setY(this.pos.y + 4);
+        if (this.trailPrev) {
+          this.ctx.ordnance.pushTrail(this.trailPrev, here, this.mods.contrailLife, this.mods.contrailDamage, this.mods.contrailImpact, this.mods.contrailWidth, PLAYER_GLOW);
+        }
+        this.trailPrev = here;
+      }
+    } else this.trailPrev = null;
 
     // ---- SLIPSTREAM: passing within 8m of a hostile above 120 velocity ----
     if (this.mods.slipstream && this.speed > UPGRADE_VALUES.slipstreamMinSpeed) {
@@ -413,6 +708,108 @@ export class Player implements PressureTarget {
     this.ctx.audio.land(clamp01(Math.abs(this.vel.y) / 160) + 0.3);
     this.ctx.fx.vfx.landingDust(this.pos, 1);
     if (this.piling) this.resolvePileDriver();
+    this.dischargeGroundEffect();
+  }
+
+  /** GROUND EFFECT: the charge you built skating low is spent the moment you touch down. */
+  private dischargeGroundEffect() {
+    if (!this.mods.groundEffect || this.groundCharge < 1) return;
+    const charge = Math.round(this.groundCharge);
+    this.groundCharge = 0;
+    const damage = charge * this.mods.geDamage;
+    const impact = charge * this.mods.geImpact;
+    this.ctx.fx.ring(this.pos, 3, this.mods.geRadius, PLAYER_GLOW, 0.5);
+    this.ctx.shake(clamp01(charge / 100) * 0.8);
+    this.ctx.audio.pileDriver();
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive) continue;
+      if (h.pos.distanceTo(this.pos) < this.mods.geRadius) this.dealDamage(h, damage, impact, 'upgrade');
+    }
+    this.events.onFlash(`GROUND EFFECT · ${charge}`, '#8ff4ff');
+  }
+
+  /**
+   * KINETIC BANK. Every unit of EN spent MOVING is taxed at 40% into the bank, so the upgrade is
+   * a conversion rather than a discount: you pay the same to fly, and the flying becomes ammunition.
+   */
+  private spendMovementEnergy(amount: number) {
+    this.energy -= amount;
+    if (this.mods.kineticBank) this.bank = Math.min(this.mods.kbMax, this.bank + amount * this.mods.kbShare);
+  }
+
+  /**
+   * Vent the bank forward. Bound to the SHOULDER B input while GROUNDED, which is otherwise a
+   * dead press — the pile driver is air-only — so the upgrade needs no new binding and the
+   * grounded/airborne split reads as one rule rather than two buttons.
+   */
+  private ventBank() {
+    const points = Math.round(this.bank);
+    if (points < 1) { this.ctx.audio.empty(); return; }
+    this.bank = 0;
+    const f = this.forward();
+    const damage = points * this.mods.kbDamage;
+    const impact = points * this.mods.kbImpact;
+    const tip = this.pos.clone().setY(this.pos.y + 8).addScaledVector(f, this.mods.kbRange * 0.5);
+    this.ctx.fx.impact(tip, PLAYER_GLOW, 5, 20);
+    this.ctx.fx.ring(this.pos, 3, this.mods.kbRange, PLAYER_GLOW, 0.4);
+    this.ctx.audio.cannon();
+    this.ctx.shake(0.5);
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive) continue;
+      const d = h.pos.clone().sub(this.pos).setY(0);
+      const dist = d.length();
+      if (dist < this.mods.kbRange && dist > 0.1 && d.normalize().dot(f) > 0.4) this.dealDamage(h, damage, impact, 'upgrade');
+    }
+    this.events.onFlash(`BANK VENTED · ${points}`, '#8ff4ff');
+  }
+
+  /**
+   * TARGET DEBT and SENSOR BLOOM both key off how long the current lock has been held, and
+   * GHOST LOCK off whether it can still be seen. One place decides all three.
+   */
+  private tickLockHold(dt: number) {
+    const primary = this.lock.primary;
+    if (primary !== this.debtLock) {
+      this.debtLock = primary;
+      this.debtT = 0;
+      this.lostSightT = 0;
+      if (this.mods.sensorBloom) this.bloomCD = this.mods.bloomCooldown;
+    } else if (primary) {
+      this.debtT += dt;
+    }
+    // GHOST LOCK: a hard lock survives a line-of-sight break for the stated window.
+    if (this.lock.hard && primary) {
+      const seen = this.ctx.hasLineOfSight(this.pos.clone().setY(this.pos.y + 8), primary.pos.clone().setY(primary.pos.y + 7));
+      if (seen) this.lostSightT = 0;
+      else {
+        this.lostSightT += dt;
+        const budget = this.mods.ghostLock ? this.mods.ghostPersist : LOS_GRACE;
+        if (this.lostSightT > budget) { this.lock.hard = false; this.lock.targets = []; this.ctx.audio.lockOff(); }
+      }
+    }
+  }
+
+  /** TARGET DEBT's current multiplier, for the blade and the HUD. */
+  get debtMultiplier() {
+    if (!this.mods.targetDebt) return 1;
+    return 1 + Math.min(this.mods.debtMax, this.debtT * this.mods.debtRate);
+  }
+  get debtCharged01() { return this.mods.targetDebt ? clamp01((this.debtMultiplier - 1) / this.mods.debtMax) : 0; }
+  get bank01() { return this.mods.kineticBank ? clamp01(this.bank / this.mods.kbMax) : 0; }
+  get groundCharge01() { return this.mods.groundEffect ? clamp01(this.groundCharge / UPGRADE_VALUES.groundEffectMax) : 0; }
+  /** BLIND ANGLE. Read by the Director's hostiles through CombatContext.targetable(). */
+  get untargetable() { return this.blindT > 0; }
+
+  /**
+   * How early THIS hostile's telegraph should appear. PREDATOR READ is global; SENSOR BLOOM adds
+   * its reveal only to the frame you are holding, and only once the lock has settled past its
+   * change cooldown. The larger of the two wins — they are two ways of seeing one windup, not
+   * two windups.
+   */
+  telegraphLeadFor(h: Hostile): number {
+    let lead = this.mods.telegraphLead;
+    if (this.mods.sensorBloom && this.bloomCD <= 0 && this.lock.all.includes(h)) lead = Math.max(lead, this.mods.bloomLead);
+    return lead;
   }
 
   // ------------------------------------------------------------------ the vanish
@@ -432,6 +829,7 @@ export class Player implements PressureTarget {
     const cost = perfect ? (this.mods.vanishRefunds ? -this.mods.vanishRefundAmount : this.mods.vanishCost) : T.quickCost;
     if (this.energy < Math.max(0, cost)) { this.ctx.audio.empty(); return false; }
 
+    const origin = this.pos.clone();
     this.energy = clamp(this.energy - cost, 0, this.mods.energyMax);
     this.regenT = 0.6;
     this.quickCD = perfect ? T.vanishCooldown : T.quickCooldown;
@@ -452,12 +850,43 @@ export class Player implements PressureTarget {
       this.lock.targets = [best];
       this.lock.hard = true;
 
+      // IMPACT REFLECTION reads the attack BEFORE it is cancelled: the impact you are converting
+      // is the impact of the thing they committed to, not of whatever they do next.
+      const committed = best.currentAttack;
       best.cancelAttack();
-      best.vitals.exposed = T.exposedDur;
+      best.vitals.exposed = this.mods.exposedDuration;
       this.vanishStreak++;
+
+      // CASCADE: consecutive reads inside the window stack bullet-time duration.
+      if (this.mods.cascade) {
+        const gap = this.ctx.time - this.lastVanishAt;
+        this.cascadeBonus = gap <= this.mods.cascadeWindow
+          ? Math.min(this.mods.cascadeMax, this.cascadeBonus + this.mods.cascadeStep)
+          : 0;
+      }
       this.lastVanishAt = this.ctx.time;
       this.invuln = 0.25;
-      this.events.enterSlow(T.vanishTimeScale, T.vanishSlowDur);
+      this.events.enterSlow(T.vanishTimeScale, T.vanishSlowDur + this.cascadeBonus);
+      if (this.cascadeBonus > 0) this.events.onFlash(`CASCADE +${this.cascadeBonus.toFixed(2)}s`, '#8ff4ff');
+
+      // IMPACT REFLECTION: their commitment becomes your stagger economy.
+      if (this.mods.impactReflection && committed) {
+        const back = ATTACKS[committed as AttackId].impact * this.mods.reflectionShare;
+        const r = best.vitals.addImpact(back, this.ctx.time, this.mods.exposedMult);
+        this.ctx.fx.tracer(this.pos.clone().setY(this.pos.y + 9), best.pos.clone().setY(best.pos.y + 7), PLAYER_GLOW, 0.7, 0.22);
+        this.events.onFlash(`REFLECTED ${Math.round(back)} IMPACT`, '#8ff4ff');
+        if (r === 2) this.events.onHostileStaggered(best, 'upgrade');
+      }
+
+      // ECHO SPLIT: afterimages at the origin, and the arena has to guess.
+      if (this.mods.echoSplit) this.spawnEchoes(origin);
+
+      // BLIND ANGLE: nothing may OPEN on you, and anything already winding up aborts.
+      if (this.mods.blindAngle) {
+        this.blindT = this.mods.blindAngleDuration;
+        for (const h of this.ctx.hostiles) if (h.alive && h.state === 'windup') h.cancelAttack();
+        this.events.onFlash('BLIND ANGLE', '#8ff4ff');
+      }
       this.ctx.fx.impact(this.pos.clone().setY(this.pos.y + 11), PLAYER_GLOW, 4, 12);
       this.ctx.fx.ring(this.pos, 2, 26, PLAYER_GLOW, 0.5);
       this.ctx.audio.perfectVanish();
@@ -474,8 +903,53 @@ export class Player implements PressureTarget {
     this.assault = false;
     this.ctx.audio.quickBoost();
     this.ctx.fx.vfx.qbBurst(this.pos.clone().setY(this.pos.y + 5), this.dash, PLAYER_GLOW);
+    this.openGravityWake(origin);
     this.events.onQuickBoost();
     return true;
+  }
+
+  /**
+   * GRAVITY THRUSTERS. A Quick Boost TOWARD the frame you are holding opens a window in which
+   * hostile ordnance near you is bent toward the wake you just left — the place you were, not
+   * the place you are.
+   *
+   * The condition is the card's and is checked here rather than assumed: there must be a lock,
+   * and the boost has to be going at it. Boosting away from your target is an escape, and an
+   * escape does not also get to be a defence.
+   */
+  private openGravityWake(origin: THREE.Vector3) {
+    if (!this.mods.gravityThrusters) return;
+    const target = this.lock.primary;
+    if (!target) return;
+    const toward = target.pos.clone().sub(origin).setY(0);
+    if (toward.lengthSq() < 1) return;
+    if (this.dash.clone().setY(0).normalize().dot(toward.normalize()) < 0.35) return;
+    this.ctx.ordnance.setDeflect(this.mods.gtDuration, this.mods.gtRadius, this.mods.gtDeflection, origin);
+    this.ctx.fx.ring(origin, 2, this.mods.gtRadius, PLAYER_GLOW, this.mods.gtDuration);
+    this.events.onFlash('WAKE', '#8ff4ff');
+  }
+
+  /**
+   * ECHO SPLIT. Afterimages stand where the vanish began; each live hostile then rolls once
+   * against the retarget chance and, if it is fooled, aims at one of them for the duration.
+   * The roll uses the AI stream, so a seed reproduces exactly who was fooled and by which image.
+   */
+  private spawnEchoes(origin: THREE.Vector3) {
+    this.ctx.ordnance.spawnDecoys(this.rig.root, origin, this.mods.echoCount, this.mods.echoDuration, PLAYER_GLOW);
+    const images = this.ctx.ordnance.decoys;
+    if (!images.length) return;
+    const rng = RNG.stream('ai');
+    let fooled = 0;
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive) continue;
+      const e = h as unknown as { decoy: THREE.Vector3 | null; decoyT: number };
+      if (rng.chance(this.mods.echoRetarget)) {
+        e.decoy = rng.pick(images).pos;
+        e.decoyT = this.mods.echoDuration;
+        fooled++;
+      }
+    }
+    if (fooled) this.events.onFlash(`ECHO SPLIT · ${fooled} MISLED`, '#8ff4ff');
   }
 
   // ------------------------------------------------------------------ hardpoints
@@ -509,21 +983,27 @@ export class Player implements PressureTarget {
     // ---- shoulder A ----
     if (locked !== 'missiles' && !this.mods.orbitingInterceptors && input.pressed('missiles') && this.rackCD <= 0) {
       this.rackCD = T.missileRackCooldown;
-      this.missileQueue = T.missileCount;
-      this.missileT = 0;
+      if (this.mods.mineLattice) this.deployMineLattice();
+      else { this.missileQueue = this.mods.swarmLock ? EVOLUTION_VALUES.swarmCount : T.missileCount; this.missileT = 0; }
     }
     if (this.missileQueue > 0 && this.missileT <= 0) {
-      this.missileT = T.missileSpacing;
+      this.missileT = this.mods.swarmLock ? T.missileSpacing * 0.45 : T.missileSpacing;
       this.missileQueue--;
       this.launchMissile();
     }
 
     // ---- shoulder B ----
-    if (locked !== 'pile' && input.pressed('pile') && this.pileCD <= 0 && this.altitude > T.pileMinAltitude && !this.piling) {
-      this.piling = true;
-      this.pileCD = this.mods.pileCooldown;
-      this.ctx.audio.assaultBoostOn();
-      this.driver.fireShoulder();
+    // The driver is air-only. On the ground the same input vents the KINETIC BANK, which is
+    // otherwise a dead press — one button, two states, no second binding to learn.
+    if (locked !== 'pile' && input.pressed('pile')) {
+      if (this.pileCD <= 0 && this.altitude > T.pileMinAltitude && !this.piling) {
+        this.piling = true;
+        this.pileCD = this.mods.pileCooldown;
+        this.ctx.audio.assaultBoostOn();
+        this.driver.fireShoulder();
+      } else if (this.mods.kineticBank && this.altitude <= T.pileMinAltitude) {
+        this.ventBank();
+      }
     }
   }
 
@@ -547,6 +1027,10 @@ export class Player implements PressureTarget {
     // which would make CHAIN READ silently never fire
     const wasLocked = this.lock.targets.includes(h);
     h.applyHit(damage * scale, impact * scale, source);
+    // OVERPRESSURE: the decay clock is suspended for a stated window, not the ceiling raised.
+    if (this.mods.overpressure && impact > 0) h.vitals.impactFrozenFor = Math.max(h.vitals.impactFrozenFor, this.mods.overpressureHold);
+    // BREAKER: the clock is not suspended, it is removed. Every frame you touch stays touched.
+    if (this.mods.impactNeverDecays && impact > 0) h.vitals.noDecay = true;
     // Landing damage on a target you broke is the conversion the score is asking about.
     if (wasStaggered && source !== 'upgrade') this.events.onConversion(h);
     if (!h.alive) this.onKill(h, source, wasLocked);
@@ -566,6 +1050,8 @@ export class Player implements PressureTarget {
   }
 
   private fireRifle() {
+    // LOCK-SPLITTING RIFLE fires at EVERY lock at once rather than alternating between them.
+    if (this.mods.lockSplittingRifle && this.lock.all.length > 1) { this.fireLockSplitting(); return; }
     const tgt = this.mods.splitLock ? this.lock.nextFireTarget() : this.lock.primary ?? LockSystem.best(this.ctx.hostiles, this.pos, this.forward());
     const muzzle = new THREE.Vector3();
     this.rig.muzzleR.getWorldPosition(muzzle);
@@ -576,7 +1062,52 @@ export class Player implements PressureTarget {
     this.ctx.fx.vfx.muzzle(muzzle, this.forward(), 0.8);
     this.ctx.audio.rifle();
     this.driver.fireRifle();
-    if (tgt && tgt.pos.distanceTo(this.pos) < T.rifleRange) this.dealDamage(tgt, T.rifleDamage, T.rifleImpact, 'rifle');
+    if (tgt && tgt.pos.distanceTo(this.pos) < T.rifleRange) {
+      this.dealDamage(tgt, T.rifleDamage, T.rifleImpact, 'rifle');
+      this.ricochet(tgt);
+    }
+  }
+
+  /** LOCK-SPLITTING RIFLE: 43 dmg · 18 impact into every held lock, simultaneously. */
+  private fireLockSplitting() {
+    const muzzle = new THREE.Vector3();
+    this.rig.muzzleR.getWorldPosition(muzzle);
+    this.ctx.audio.rifle();
+    this.driver.fireRifle();
+    for (const tgt of this.lock.all) {
+      if (tgt.pos.distanceTo(this.pos) > T.rifleRange) continue;
+      this.ctx.fx.tracer(muzzle, tgt.pos.clone().setY(tgt.pos.y + 7), PLAYER_GLOW, 0.7);
+      this.dealDamage(tgt, EVOLUTION_VALUES.lockSplitDamage, EVOLUTION_VALUES.lockSplitImpact, 'rifle');
+      this.ricochet(tgt);
+    }
+  }
+
+  /** RICOCHET RIFLE: every hit bounces to a second hostile within 40m at 60%. */
+  private ricochet(from: Hostile) {
+    if (!this.mods.ricochetRifle) return;
+    let best: Hostile | null = null, bd: number = EVOLUTION_VALUES.ricochetRange;
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive || h === from) continue;
+      const d = h.pos.distanceTo(from.pos);
+      if (d < bd) { bd = d; best = h; }
+    }
+    if (!best) return;
+    this.ctx.fx.tracer(from.pos.clone().setY(from.pos.y + 7), best.pos.clone().setY(best.pos.y + 7), PLAYER_GLOW, 0.5, 0.09);
+    this.dealDamage(best, EVOLUTION_VALUES.ricochetDamage, EVOLUTION_VALUES.ricochetImpact, 'rifle');
+  }
+
+  /** MINE LATTICE: the rack stops firing and starts placing. 6 mines, 12.0s, 9m trigger. */
+  private deployMineLattice() {
+    const f = this.forward(), r = this.right();
+    for (let i = 0; i < EVOLUTION_VALUES.mineLatticeCount; i++) {
+      const a = (i / EVOLUTION_VALUES.mineLatticeCount) * Math.PI * 2;
+      const p = this.pos.clone().addScaledVector(f, Math.cos(a) * 26).addScaledVector(r, Math.sin(a) * 26);
+      this.ctx.confine(p, 6);
+      p.y = this.ctx.groundAt(p.x, p.z) + 1.6;
+      this.ctx.ordnance.spawnMine(p, EVOLUTION_VALUES.mineLatticeDamage, EVOLUTION_VALUES.mineLatticeImpact, PLAYER_GLOW, false, EVOLUTION_VALUES.mineLatticeTrigger, EVOLUTION_VALUES.mineLatticeLife);
+    }
+    this.ctx.audio.deploy();
+    this.events.onFlash('MINE LATTICE', '#8ff4ff');
   }
 
   /** MOMENTUM RAILGUN: 0.55s charge, 380 dmg / 160 impact, cannot fire below 90 velocity. */
@@ -651,15 +1182,37 @@ export class Player implements PressureTarget {
     this.bladeStrike(tgt, EVOLUTION_VALUES.tetherDamage, EVOLUTION_VALUES.tetherImpact);
   }
 
-  /** EXECUTION PROTOCOL: blade vs staggered deals +200% and immediately refunds the cooldown. */
+  /**
+   * Every blade hit funnels through here, so the branch evolutions and the STAGGER upgrades
+   * compose in one auditable order:
+   *   1. EXECUTION BLADE decides the base magnitude from the target's STATE.
+   *   2. TARGET DEBT multiplies whatever that produced, then dumps and resets.
+   *   3. EXECUTION PROTOCOL amplifies against a staggered frame and refunds the cooldown.
+   *   4. PHASE BLADE changes the damage SOURCE, so plates do not get a vote.
+   */
   private bladeStrike(h: Hostile, damage: number, impact: number) {
     let dmg = damage;
+    let imp = impact;
+    if (this.mods.executionBlade) {
+      const finish = h.vitals.staggered || h.vitals.isExposed;
+      dmg = finish ? EVOLUTION_VALUES.executionBladeHigh : EVOLUTION_VALUES.executionBladeLow;
+      if (finish) this.events.onFlash('EXECUTION BLADE', '#ffd24a');
+    }
+    if (this.mods.phaseBlade) { dmg = EVOLUTION_VALUES.phaseBladeDamage; imp = EVOLUTION_VALUES.phaseBladeImpact; }
+    if (this.mods.targetDebt && this.debtT > 0) {
+      const mult = this.debtMultiplier;
+      if (mult > 1.01) {
+        dmg *= mult;
+        this.events.onFlash(`TARGET DEBT ×${mult.toFixed(2)}`, '#ffd24a');
+      }
+      this.debtT = 0;
+    }
     if (this.mods.executionProtocol && h.vitals.staggered) {
       dmg *= this.mods.executionMult;
       this.bladeCD = 0;
       this.events.onFlash('EXECUTION', '#ffd24a');
     }
-    this.dealDamage(h, dmg, impact, 'blade');
+    this.dealDamage(h, dmg, imp, this.mods.phaseBlade ? 'phase' : 'blade');
   }
 
   private launchMissile() {
@@ -686,7 +1239,21 @@ export class Player implements PressureTarget {
       const d = h.pos.distanceTo(this.pos);
       if (d < bd) { bd = d; direct = h; }
     }
-    if (direct) this.dealDamage(direct, T.pileDamage, T.pileImpact, 'pile');
+    if (direct) {
+      if (this.mods.anchorDriver) {
+        // ANCHOR DRIVER: the target loses the verb, not the health bar.
+        (direct as unknown as { pinned: number }).pinned = EVOLUTION_VALUES.anchorPin;
+        this.dealDamage(direct, EVOLUTION_VALUES.anchorDamage, EVOLUTION_VALUES.anchorImpact, 'pile');
+        this.ctx.fx.ring(direct.pos, 2, 18, PLAYER_GLOW, EVOLUTION_VALUES.anchorPin);
+        this.events.onFlash(`PINNED ${EVOLUTION_VALUES.anchorPin.toFixed(1)}s`, '#8ff4ff');
+      } else if (this.mods.breachDriver) {
+        // BREACH DRIVER: plates and shields are destroyed rather than out-damaged.
+        this.dealDamage(direct, EVOLUTION_VALUES.breachDamage, EVOLUTION_VALUES.breachImpact, 'breach');
+        this.events.onFlash('BREACH', '#ffd24a');
+      } else {
+        this.dealDamage(direct, T.pileDamage, T.pileImpact, 'pile');
+      }
+    }
     if (this.mods.seismicDriver) {
       for (const h of this.ctx.hostiles) {
         if (!h.alive || h === direct) continue;
@@ -708,8 +1275,71 @@ export class Player implements PressureTarget {
       }
       this.events.onFlash('CASCADE BREAK', '#8ff4ff');
     }
+    // SINGULARITY ENGINE: the wreck pulls the formation onto itself for 0.6s.
+    if (this.mods.singularity) {
+      const to = h.pos.clone();
+      let pulled = 0;
+      for (const o of this.ctx.hostiles) {
+        if (o === h || !o.alive) continue;
+        if (o.pos.distanceTo(to) > this.mods.singRadius) continue;
+        (o as unknown as { pull: { to: THREE.Vector3; speed: number; t: number } | null }).pull =
+          { to, speed: this.mods.singSpeed, t: this.mods.singDuration };
+        pulled++;
+      }
+      this.ctx.fx.ring(to, this.mods.singRadius, 4, PLAYER_GLOW, this.mods.singDuration);
+      if (pulled) this.events.onFlash(`SINGULARITY · ${pulled} DRAWN IN`, '#8ff4ff');
+    }
+    // FAULT LINE: breaking a frame you had already READ breaks its neighbour too.
+    if (this.mods.faultLine && h.vitals.isExposed) {
+      const near = this.ctx.hostiles
+        .filter((o) => o !== h && o.alive && !o.vitals.staggered && o.pos.distanceTo(h.pos) < this.mods.flRadius)
+        .sort((a, b) => a.pos.distanceTo(h.pos) - b.pos.distanceTo(h.pos))
+        .slice(0, this.mods.flTargets);
+      for (const o of near) {
+        if (o.vitals.forceStagger(this.ctx.time)) {
+          this.ctx.fx.tracer(h.pos.clone().setY(h.pos.y + 7), o.pos.clone().setY(o.pos.y + 7), 0xffd24a, 0.9, 0.3);
+          this.events.onHostileStaggered(o, 'upgrade');
+        }
+      }
+      if (near.length) this.events.onFlash('FAULT LINE', '#ffd24a');
+    }
     // REACTOR BLEED: drop a 40 EN core for 8.0s.
     if (this.mods.reactorBleed) this.ctx.ordnance.spawnCore(h.pos.clone(), this.mods.bleedEnergy, this.mods.bleedLife);
+  }
+
+  /**
+   * SHARED FAULT. A broken frame emits a 35m field that slows every OTHER hostile's windup by
+   * 40%. Evaluated once per frame over the roster rather than pushed from the stagger event, so
+   * a hostile that walks into the field mid-windup is slowed and one that leaves is not.
+   */
+  applySharedFault() {
+    if (!this.mods.sharedFault) return;
+    const broken = this.ctx.hostiles.filter((h) => h.alive && h.vitals.staggered);
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive) continue;
+      const e = h as unknown as { windupSlow: number };
+      if (h.vitals.staggered) { e.windupSlow = 1; continue; }
+      const inField = broken.some((b) => b.pos.distanceTo(h.pos) < this.mods.sfRadius);
+      e.windupSlow = inField ? 1 - this.mods.sfSlow : 1;
+    }
+  }
+
+  /** COUNTERWEIGHT. Rally wins apply the full 1,400 impact to everything within 40m. */
+  applyCounterweight(at: THREE.Vector3) {
+    if (!this.mods.counterweight) return 0;
+    let n = 0;
+    for (const h of this.ctx.hostiles) {
+      if (!h.alive || h.pos.distanceTo(at) > this.mods.counterweightRadius) continue;
+      const r = h.vitals.addImpact(UPGRADE_VALUES.counterweightImpact, this.ctx.time, this.mods.exposedMult);
+      this.ctx.fx.tracer(at.clone().setY(at.y + 8), h.pos.clone().setY(h.pos.y + 7), 0xffd24a, 0.8, 0.3);
+      if (r === 2) this.events.onHostileStaggered(h, 'upgrade');
+      n++;
+    }
+    if (n) {
+      this.ctx.fx.ring(at, 3, this.mods.counterweightRadius, 0xffd24a, 0.5);
+      this.events.onFlash(`COUNTERWEIGHT · ${n}`, '#ffd24a');
+    }
+    return n;
   }
 
   addEnergy(amount: number) { this.energy = clamp(this.energy + amount, 0, this.mods.energyMax); }

@@ -57,6 +57,27 @@ export class Director {
   /** Raised by FLANK DEBT (GDD §8.2) and by the FALL ladder. Shapes orbit, never token count. */
   forwardBias = T.orbitForwardBias;
   /**
+   * BEARING SEPARATION — how hard non-attacking hostiles push apart in BEARING around the pilot.
+   *
+   * Added in v0.3 because measurement forced it. v2.3 PATCH 4 raised FLANK DEBT's forward bias
+   * from 0.34 to 0.45 to escape the dead zone, and paired it with a spawn-spread step. Both
+   * levers were then verified to be SET (0.16 -> 0.45, spread 0.30 -> 0.60) and the mean
+   * encirclement arc still did not move: 69.9 degrees clean against 68.2 with the downside held,
+   * a delta of -1.6 where the patch requires +12.
+   *
+   * The reason is structural. Forward bias is a spiral-in ratio on a normalised steering vector,
+   * and the band clamp catches the spiral: a hostile pulled inward stops at the band's inner
+   * edge and resumes orbiting. It therefore shapes the APPROACH and leaves the steady-state
+   * bearing distribution — which is what the arc measures — essentially untouched. Spawn spread
+   * jitters arrivals around one Director-chosen bearing, so it does not distribute them either.
+   *
+   * The arc is `360 - largest bearing gap`. To widen it you must widen BEARINGS, which is what
+   * this does: each hostile pushes tangentially away from the nearest other hostile's bearing,
+   * capped by its own speed. It is positional pressure and nothing else — it cannot change how
+   * many tokens exist, how much anything hits for, or how much structure anything has.
+   */
+  bearingSeparation = 0;
+  /**
    * The active FALL tier. It may move token COOLDOWN, orbit bias, composition, sequencing
    * availability, bearing spread and wave pacing — and nothing else. It cannot reach
    * `arcTokens`, which is a pure function of the arc and the sector.
@@ -80,6 +101,7 @@ export class Director {
   resetEncounter(sector: number) {
     this.sector = sector;
     this.forwardBias = Math.max(this.fall.forwardBias, this.flankDebt ? T.flankDebtBias : 0);
+    this.bearingSeparation = this.flankDebt ? T.flankDebtBearingSeparation : 0;
     this._arc = 0;
     this.tokenHolders = [];
     this.encounterTime = 0;
@@ -225,11 +247,20 @@ export class Director {
     return rng.weighted(pool, pool.map((a) => this.pressure.archetype[a] ?? 1));
   }
 
+  /**
+   * Radians of jitter around the chosen reinforcement bearing.
+   *
+   * v2.3 PATCH 4 pairs FLANK DEBT's raised forward bias with a spawn-spread step, because the
+   * bias alone shapes where hostiles DRIFT and the spread shapes where they ARRIVE. Both widen
+   * the arc; neither can touch how many tokens exist.
+   */
+  get spawnSpread() { return this.fall.spawnSpread + (this.flankDebt ? T.flankDebtSpawnSpread : 0); }
+
   /** Spawn bearing for a reinforcement, in world radians. */
   spawnBearing(target: PressureTarget): number {
     const rng = RNG.stream('spawn');
     const facing = Math.atan2(target.forward().x, target.forward().z);
-    return facing + this.pressure.bearing + rng.range(-this.fall.spawnSpread, this.fall.spawnSpread);
+    return facing + this.pressure.bearing + rng.range(-this.spawnSpread, this.spawnSpread);
   }
 
   /** Seconds before a hostile that released a token may take another. */
@@ -238,7 +269,7 @@ export class Director {
   snapshot() {
     return {
       arc: +this._arc.toFixed(2),
-      fall: { tier: this.fall.id, name: this.fall.name, tokenCooldown: this.fall.tokenCooldown, forwardBias: this.forwardBias, arenaCeiling: this.fall.arenaCeiling, asyncAllowed: this.fall.asyncAllowed, elites: this.fall.elites, corruptedFraction: this.fall.corruptedFraction },
+      fall: { tier: this.fall.id, name: this.fall.name, tokenCooldown: this.fall.tokenCooldown, forwardBias: this.forwardBias, spawnSpread: +this.spawnSpread.toFixed(2), bearingSeparation: this.bearingSeparation, flankDebt: this.flankDebt, arenaCeiling: this.fall.arenaCeiling, asyncAllowed: this.fall.asyncAllowed, elites: this.fall.elites, corruptedFraction: this.fall.corruptedFraction },
       tokenCount: this.tokenCount,
       tokenSource: this.tokenSource,
       tokenHolders: this.tokenHolders.slice(),

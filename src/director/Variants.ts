@@ -31,7 +31,10 @@ export type ObjectiveMode =
   | 'reach-exit'       // fly it, survive it
   | 'survive'          // hold out for a duration under continuous pressure
   | 'destroy-targets'  // kill the transports before they leave
-  | 'intercept';       // bring down a runner before it escapes
+  | 'intercept'        // bring down a runner before it escapes
+  | 'defend'           // an emplacement degrades while hostiles stand on it
+  | 'assassinate'      // one marked frame inside a formation; the rest are weather
+  | 'escort';          // the asset moves, and it decides where you have to be
 
 export interface VariantSpec {
   id: string;
@@ -60,6 +63,9 @@ export interface VariantSpec {
   /** Seconds, for survive and for the timers on destroy-targets / intercept. */
   duration?: number;
   targets?: number;
+
+  /** OBJECTIVE: the point's structure, when the configuration raises one. */
+  pointStructure?: number;
 
   // --- behaviour modifiers ---
   /** The opponent mirrors the player's reactor behaviour. */
@@ -143,6 +149,27 @@ export const VARIANTS: VariantSpec[] = [
   V({ id: 'hunt-interceptors', state: 'HUNT', name: 'INTERCEPTORS', brief: 'THEY ARE MINING YOUR ALTITUDE',
       asks: 'the altitude band you want is the one they have seeded',
       pool: ['harrier'], count: [3, 4], waves: 2, tightWindups: true, geometry: 'baseline', objective: 'clear' }),
+
+  // -------------------------------------------------------------------------- OBJECTIVE
+  //
+  // Four configurations of one idea: rotation under a positional constraint you did not choose.
+  // The composition and the Director are untouched — what changes is where you are allowed to be.
+  V({ id: 'objective-defend', state: 'OBJECTIVE', name: 'DEFEND', brief: 'HOLD THE EMPLACEMENT THROUGH THE WAVES',
+      asks: 'rotate around a fixed point instead of around yourself',
+      pool: ['lancer', 'sentry', 'splitter', 'brawler'], count: [3, 4], waves: 2,
+      objective: 'defend', pointStructure: 6000, duration: 95, geometry: 'baseline' }),
+  V({ id: 'objective-assassinate', state: 'OBJECTIVE', name: 'ASSASSINATE', brief: 'ONE FRAME IS MARKED. THE REST ARE WEATHER',
+      asks: 'reach one bearing through four that would rather you did not',
+      pool: ['lancer', 'sentry', 'hook', 'warden'], count: [4, 5], waves: 0,
+      objective: 'assassinate', geometry: 'baseline' }),
+  V({ id: 'objective-intercept', state: 'OBJECTIVE', name: 'INTERCEPT', brief: 'NOTHING CROSSES THE VOLUME',
+      asks: 'split your attention between a formation and a clock',
+      pool: ['hook', 'splitter', 'harrier'], count: [2, 3], waves: 1,
+      objective: 'destroy-targets', targets: 4, duration: 80, geometry: 'baseline' }),
+  V({ id: 'objective-escort', state: 'OBJECTIVE', name: 'ESCORT', brief: 'IT IS MOVING. STAY BETWEEN IT AND THEM',
+      asks: 'hold a formation in front of a point that will not stop travelling',
+      pool: ['lancer', 'brawler', 'hook', 'splitter'], count: [3, 4], waves: 2,
+      objective: 'escort', pointStructure: 6000, geometry: 'baseline' }),
 
   // -------------------------------------------------------------------------- TRAVERSAL
   V({ id: 'traversal-conduit', state: 'TRAVERSAL', name: 'CONDUIT RUN', brief: 'FLY IT CLEAN',

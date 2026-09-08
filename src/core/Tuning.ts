@@ -61,7 +61,14 @@ export const T = {
   tokenCooldown: 1.5,
   tokenCooldownS4: 1.0,
   orbitForwardBias: 0.18,
-  flankDebtBias: 0.34,       // FLANK DEBT corrupted downside (GDD §8.2)
+  // v2.3 PATCH 4: 0.34 sits inside the measured dead zone (the lever is inert below ~0.35), so
+  // the downside cost the player nothing. Raised past the threshold and paired with a spawn
+  // spread step; the acceptance bar is +12 degrees of mean arc on the harness.
+  flankDebtBias: 0.45,
+  flankDebtSpawnSpread: 0.30,
+  // The lever that actually widens the arc. See Director.bearingSeparation for why the two
+  // levers above are not enough on their own, and what was measured before this was added.
+  flankDebtBearingSeparation: 1.9,
 
   // ---------------------------------------------------------------- pilot model (GDD §6.3)
   pilotBlendCurrent: 0.70,
@@ -111,6 +118,15 @@ export const T = {
   counterVanishP1Every: 2,
   counterVanishP2Chance: 0.60,
   counterVanishP2Cooldown: 4.0,
+  // ---------------------------------------------------------------- sector 2 bosses (§9, RC §2.2)
+  chorusStructure: 34000,
+  chorusImpactMax: 1500,
+  chorusPhase2At: 0.55,
+  chorusPhase3At: 0.25,
+  kilnworksStructure: 44000,
+  kilnworksArms: 4,
+  kilnworksArmStructure: 5200,
+  kilnworksLineSpeed: 26,
 
   // ---------------------------------------------------------------- scoring (GDD §10)
   scoreWeightControl: 0.30,
@@ -140,6 +156,7 @@ export const TUNING_GROUPS: { title: string; keys: TuningKey[] }[] = [
   { title: 'HARDPOINTS', keys: ['rifleRate', 'rifleDamage', 'rifleImpact', 'bladeRange', 'bladeDamage', 'bladeImpact', 'bladeCooldown', 'missileCount', 'missileDamage', 'missileImpact', 'missileRackCooldown', 'missileSpacing', 'pileDamage', 'pileImpact', 'pileCooldown'] },
   { title: 'CAMERA', keys: ['camDist', 'camHeight', 'camLag', 'camFov', 'camFovBoost', 'mouseSens', 'padLookSens'] },
   { title: 'SEVERANCE', keys: ['severanceStructure', 'severancePhase2At', 'counterVanishP1Every', 'counterVanishP2Chance', 'counterVanishP2Cooldown'] },
+  { title: 'SECTOR 2 BOSSES', keys: ['chorusStructure', 'chorusImpactMax', 'chorusPhase2At', 'chorusPhase3At', 'kilnworksStructure', 'kilnworksArmStructure', 'kilnworksLineSpeed'] },
   { title: 'DEBUG', keys: ['godMode', 'infiniteEnergy', 'aiEnabled', 'showTelemetry'] },
 ];
 

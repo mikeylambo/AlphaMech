@@ -1,7 +1,7 @@
 import { RNG } from '../core/RNG';
 import { ReactorId, REACTORS } from './Reactors';
 import { UpgradeId, UPGRADE_IDS, UPGRADES } from './Upgrades';
-import { EvolutionId, HardpointId, HARDPOINT_ORDER, evolutionFor } from './Weapons';
+import { EvolutionId, HardpointId, HARDPOINT_ORDER, offeredEvolution } from './Weapons';
 import { ChainSpec, selectChains } from '../director/Chains';
 import { StressTag } from '../director/Encounters';
 import { classify, Classification } from './Disciplines';
@@ -143,9 +143,11 @@ export class RunState {
       }
     }
 
+    // Three branches exist per hardpoint (§8.3); the seed decides which one this FORGE offers,
+    // so an un-evolved hardpoint is a different card at a different FORGE of a different run.
     const evolutions = HARDPOINT_ORDER
       .filter((h) => !this.evolvedHardpoints.includes(h))
-      .map((h) => ({ hardpoint: h, evolution: evolutionFor(h).id }));
+      .map((h) => ({ hardpoint: h, evolution: offeredEvolution(h) }));
 
     return { upgrades: cards, evolutions };
   }

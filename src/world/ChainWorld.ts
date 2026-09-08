@@ -4,7 +4,7 @@ import { Rng, clamp, clamp01, smooth } from '../core/MathUtil';
 import { Batch, Cover, boxGeo, cylGeo, corridorDressing, kitMaterials, scatterCover, skylinePillars, KitMaterials } from './Kit';
 import { ChainSpec, TissueId } from '../director/Chains';
 import { ENCOUNTERS, EncounterId } from '../director/Encounters';
-import { SECTOR_LOOKS } from './Sector';
+import { sectorLook } from './Sector';
 
 /**
  * The chain as one continuous piece of world.
@@ -62,11 +62,35 @@ export interface Hazard {
   cd: number;
 }
 
+/**
+ * SECTOR 2's environmental verb.
+ *
+ * "Machines alter the environment: moving platforms, active hazards, conveyor volumes" (§2.3).
+ * A conveyor is a band of floor that MOVES — it carries the pilot and every hostile standing on
+ * it, so a formation that was holding a bearing drifts out of it for free and holding position
+ * costs continuous thrust. It touches no damage value, no structure value and no arc threshold:
+ * it is pure positioning pressure, which is the only kind Sector 2 is allowed to add.
+ */
+export interface Conveyor {
+  z0: number; z1: number;
+  halfWidth: number;
+  centreX: number;
+  /** Unit direction of travel, planar. */
+  dx: number; dz: number;
+  speed: number;
+  /** Height band the flow reaches. Fly above it and you are free of it. */
+  y0: number; y1: number;
+  belt: THREE.Mesh;
+}
+
 const ARENA_RADIUS = 330;
 const CORRIDOR_HALF = 150;
 const SHAFT_RADIUS = 250;
 const LINK_HALF = 140;
 const COVER_MAX_HEIGHT = 17;   // silhouette contract: nothing occludes the horizon in a fight
+const ROOF_HEIGHT = 268;       // above T.ceiling (240): visible, never something you bump into
+const CONVEYOR_SPEED = 17;     // m/s of lateral drift while standing in the band
+const CONVEYOR_REACH = 26;     // metres of altitude the flow reaches
 
 /**
  * ONE SECTOR of the descent.
@@ -80,6 +104,7 @@ export class Sector {
   volumes: Volume[] = [];
   gates: Gate[] = [];
   hazards: Hazard[] = [];
+  conveyors: Conveyor[] = [];
   /** Encounter volumes in play order. */
   nodes: Volume[] = [];
   forges: Volume[] = [];
@@ -121,7 +146,7 @@ export class Sector {
     });
     this.root.clear();
     this.scene.remove(this.root);
-    this.volumes = []; this.gates = []; this.hazards = []; this.nodes = []; this.forges = []; this.boss = null;
+    this.volumes = []; this.gates = []; this.hazards = []; this.conveyors = []; this.nodes = []; this.forges = []; this.boss = null;
     this.ready = false;
   }
 
@@ -225,7 +250,16 @@ export class Sector {
       case 'arena': {
         this.floorDisc(v, v.radius + 160, m.concrete);
         v.cover = scatterCover(b, m, rng, { count: 22, inner: 80, outer: v.radius - 60, maxHeight: COVER_MAX_HEIGHT, centerZ: cz, floorAt: () => v.y0 });
-        skylinePillars(b, m, rng, { count: 34, inner: v.radius + 150, outer: v.radius + 900, centerZ: cz, baseY: v.y0 });
+        if (this.interior) {
+          // MANUFACTURE: cooling stacks in place of a skyline, a casting channel across the
+          // floor, and a roof. The volume reads as a room rather than a plateau.
+          this.coolingStacks(b, m, rng, v, cz);
+          this.castingChannel(b, m, v, cz);
+          this.roof(v, cz, v.radius + 200);
+          this.conveyorBand(v, cz);
+        } else {
+          skylinePillars(b, m, rng, { count: 34, inner: v.radius + 150, outer: v.radius + 900, centerZ: cz, baseY: v.y0 });
+        }
         this.boundaryRing(v, cz);
         break;
       }
@@ -250,7 +284,8 @@ export class Sector {
           const h = rng.range(48, 170);
           b.add(boxGeo(rng.range(30, 62), 4, rng.range(30, 62), 10).translate(Math.cos(a) * d, v.y0 + h, cz + Math.sin(a) * d), m.panel);
         }
-        skylinePillars(b, m, rng, { count: 26, inner: v.radius + 140, outer: v.radius + 800, centerZ: cz, baseY: v.y0 });
+        if (this.interior) { this.coolingStacks(b, m, rng, v, cz); this.roof(v, cz, v.radius + 160); }
+        else skylinePillars(b, m, rng, { count: 26, inner: v.radius + 140, outer: v.radius + 800, centerZ: cz, baseY: v.y0 });
         this.boundaryRing(v, cz);
         break;
       }
@@ -259,7 +294,12 @@ export class Sector {
         const floorAt = (_x: number, z: number) => this.rampY(v, clamp01((z - v.z0) / (v.z1 - v.z0)));
         v.cover = scatterCover(b, m, rng, { count: 20, inner: 140, outer: (v.z1 - v.z0) - 140, maxHeight: COVER_MAX_HEIGHT, lateral: v.halfWidth - 40, centerZ: v.z0, floorAt });
         corridorDressing(b, m, rng, { z0: v.z0 + 60, z1: v.z1 - 60, halfWidth: v.halfWidth, floorAt });
-        skylinePillars(b, m, rng, { count: 22, inner: v.halfWidth + 220, outer: v.halfWidth + 900, centerZ: cz, baseY: (v.y0 + v.y1) / 2 });
+        if (this.interior) {
+          this.castingLine(b, m, rng, v);
+          this.conveyorBand(v, cz);
+        } else {
+          skylinePillars(b, m, rng, { count: 22, inner: v.halfWidth + 220, outer: v.halfWidth + 900, centerZ: cz, baseY: (v.y0 + v.y1) / 2 });
+        }
         if (v.state === 'TRAVERSAL') this.buildHazards(v, rng);
         break;
       }
@@ -305,7 +345,8 @@ export class Sector {
           b.add(boxGeo(46, h, 46, 16).translate(x, v.y0 + h / 2, z), i % 3 ? m.concrete : m.panel);
           b.add(boxGeo(50, 2, 50, 8).translate(x, v.y0 + h, z), m.rust);
         }
-        skylinePillars(b, m, rng, { count: 30, inner: v.radius + 300, outer: v.radius + 1100, centerZ: cz, baseY: v.y0 });
+        if (this.interior) { this.coolingStacks(b, m, rng, v, cz); this.roof(v, cz, v.radius + 260); }
+        else skylinePillars(b, m, rng, { count: 30, inner: v.radius + 300, outer: v.radius + 1100, centerZ: cz, baseY: v.y0 });
         this.boundaryRing(v, cz);
         break;
       }
@@ -379,6 +420,96 @@ export class Sector {
       b.add(boxGeo(7, 16, 7, 6).translate(Math.cos(a) * 34, v.y0 + 8, cz + Math.sin(a) * 34), m.panel);
       b.add(boxGeo(9, 3, 9, 4).translate(Math.cos(a) * 34, v.y0 + 17, cz + Math.sin(a) * 34), m.warn);
     }
+  }
+
+  /** True from Sector 2 down: the descent is inside the station, and the sky is structure. */
+  get interior() { return this.sectorLook.interior; }
+
+  /**
+   * Cooling stacks. Sector 1's skyline sits far outside the volume and reads as distance;
+   * Sector 2's structure sits just outside it and reads as ENCLOSURE. Same draw budget, opposite
+   * feeling — and the horizon stays clear, because the stacks begin above head height.
+   */
+  private coolingStacks(b: Batch, m: KitMaterials, rng: Rng, v: Volume, cz: number) {
+    const inner = (v.radius > 0 ? v.radius : v.halfWidth) + 90;
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2 + rng.range(-0.12, 0.12);
+      const d = rng.range(inner, inner + 420);
+      const h = rng.range(220, 460);
+      const r = rng.range(24, 46);
+      const x = Math.cos(a) * d, z = cz + Math.sin(a) * d;
+      b.add(cylGeo(r * 0.86, r, h, 14, 12).translate(x, v.y0 + h / 2, z), i % 3 ? m.concrete : m.panel);
+      // banding + a vent glow, so a stack reads as machinery at a glance
+      for (let k = 1; k <= 3; k++) b.add(cylGeo(r * 1.1, r * 1.1, 5, 14, 8).translate(x, v.y0 + (h * k) / 4, z), m.rust);
+      b.add(cylGeo(r * 0.5, r * 0.5, 3, 12, 6).translate(x, v.y0 + h + 2, z), m.glow);
+    }
+  }
+
+  /** The casting channel: a hot line across the floor. The brightest thing in the sector. */
+  private castingChannel(b: Batch, m: KitMaterials, v: Volume, cz: number) {
+    const len = (v.radius > 0 ? v.radius : v.halfWidth) * 1.9;
+    b.add(boxGeo(len, 1.4, 20, 12).translate(0, v.y0 + 0.4, cz - 40), m.dark);
+    b.add(boxGeo(len - 8, 0.9, 12, 8).translate(0, v.y0 + 1.3, cz - 40), m.glow);
+    for (let i = -3; i <= 3; i++) {
+      b.add(boxGeo(9, 26, 26, 8).translate(i * (len / 8), v.y0 + 13, cz - 40), m.panel);
+    }
+  }
+
+  /** A corridor that is a production line: rails, ladle carriages, and a lit pour beneath. */
+  private castingLine(b: Batch, m: KitMaterials, rng: Rng, v: Volume) {
+    const floorAt = (x: number, z: number) => this.rampY(v, clamp01((z - v.z0) / (v.z1 - v.z0))) + 0 * x;
+    for (let z = v.z0 + 80; z < v.z1 - 80; z += 120) {
+      const y = floorAt(0, z);
+      for (const sgn of [-1, 1]) {
+        b.add(boxGeo(6, 2.2, 110, 10).translate(sgn * 46, y + 1.1, z), m.rust);
+        b.add(boxGeo(4, 0.7, 104, 6).translate(sgn * 46, y + 2.3, z), m.glow);
+      }
+      if (rng.chance(0.55)) {
+        const h = rng.range(14, 22);
+        b.add(boxGeo(34, h, 30, 10).translate(rng.range(-30, 30), y + h / 2, z + rng.range(-30, 30)), m.panel);
+      }
+      // overhead conveyor: crosses the corridor high, so it frames without occluding
+      b.add(boxGeo(v.halfWidth * 2 + 40, 6, 14, 14).translate(0, y + 96, z), m.rust);
+      b.add(boxGeo(v.halfWidth * 2 + 30, 1.1, 3, 6).translate(0, y + 91, z), m.glow);
+    }
+  }
+
+  /** A low ceiling plane. Interior sectors are rooms; the altitude cap should be visible. */
+  private roof(v: Volume, cz: number, span: number) {
+    const g = new THREE.PlaneGeometry(span * 2, span * 2);
+    g.rotateX(Math.PI / 2);
+    const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x1a2126, roughness: 0.95, metalness: 0.2, side: THREE.FrontSide }));
+    mesh.position.set(0, v.y0 + ROOF_HEIGHT, cz);
+    v.group.add(mesh);
+  }
+
+  /**
+   * Lay a conveyor band across an interior volume. One per volume, crossing it laterally, so it
+   * is a thing you have to keep stepping off rather than a thing you can stand beside.
+   */
+  private conveyorBand(v: Volume, cz: number) {
+    const half = v.radius > 0 ? v.radius : v.halfWidth;
+    const width = 78;
+    const z0 = cz + 60 - width / 2, z1 = cz + 60 + width / 2;
+    /**
+     * The band's height window follows the FLOOR under it, not the volume's origin. A corridor
+     * ramps as much as 70m across its length, so anchoring the window to `y0` put the reachable
+     * band far above the deck the player is actually standing on and the conveyor did nothing.
+     */
+    const floor = this.rampY(v, clamp01(((z0 + z1) / 2 - v.z0) / Math.max(1, v.z1 - v.z0)));
+    const dir = this.rng.chance(0.5) ? 1 : -1;
+    const geo = new THREE.PlaneGeometry(half * 1.8, width);
+    geo.rotateX(-Math.PI / 2);
+    const belt = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: 0xff8c3a, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }));
+    belt.position.set(0, floor + 0.5, (z0 + z1) / 2);
+    v.group.add(belt);
+    this.conveyors.push({
+      z0, z1, halfWidth: half * 0.9, centreX: 0,
+      dx: dir, dz: 0, speed: CONVEYOR_SPEED,
+      y0: floor - 6, y1: floor + CONVEYOR_REACH, belt,
+    });
   }
 
   /** TRAVERSAL hazards: environmental damage, no combat. Both read on the ground plane. */
@@ -550,8 +681,48 @@ export class Sector {
     return { visible, total: this.volumes.length };
   }
 
+  /**
+   * Cover occludes a lock. Sampled along the segment rather than solved analytically: cover is a
+   * short list of cylinders and the samples are cheap, and sampling handles the height check
+   * (a block only blocks while the LINE is below its roof) without a special case.
+   */
+  hasLineOfSight(a: THREE.Vector3, b: THREE.Vector3): boolean {
+    const v = this.volumeAt((a.z + b.z) / 2);
+    if (!v.cover.length) return true;
+    const steps = 10;
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const x = a.x + (b.x - a.x) * t;
+      const z = a.z + (b.z - a.z) * t;
+      const y = a.y + (b.y - a.y) * t;
+      for (const c of v.cover) {
+        if (y > c.top) continue;
+        const dx = x - c.x, dz = z - c.z;
+        if (dx * dx + dz * dz < c.r * c.r) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Flow contribution at a world position, metres per second. Zero everywhere except inside a
+   * conveyor band, and zero above its reach — climbing out of the flow is always an option, and
+   * it costs EN, which is the trade the mechanic is making.
+   */
+  flowAt(pos: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+    out.set(0, 0, 0);
+    for (const c of this.conveyors) {
+      if (pos.z < c.z0 || pos.z > c.z1) continue;
+      if (pos.y < c.y0 || pos.y > c.y1) continue;
+      if (Math.abs(pos.x - c.centreX) > c.halfWidth) continue;
+      out.x += c.dx * c.speed;
+      out.z += c.dz * c.speed;
+    }
+    return out;
+  }
+
   get length() { return this.z1 - this.z0; }
-  get sectorLook() { return SECTOR_LOOKS[Math.min(4, this.sectorIndex)] ?? SECTOR_LOOKS[1]; }
+  get sectorLook() { return sectorLook(this.sectorIndex); }
 }
 
 export { clamp };
@@ -702,6 +873,25 @@ export class SectorWorld {
     if (pos.z < first.z0 + 6) { pos.z = first.z0 + 6; clamped = true; }
     if (pos.z > last.z1 - 6) { pos.z = last.z1 - 6; clamped = true; }
     return clamped;
+  }
+
+  /**
+   * Is the segment a->b clear of cover?
+   *
+   * Cover blocks are the only occluders in the game — the skyline sits outside the play space and
+   * the roof is above the altitude cap — so this is a cheap 2D capsule test against the resident
+   * volume's cover list, with a height check so flying over a block restores the sightline.
+   */
+  hasLineOfSight(a: THREE.Vector3, b: THREE.Vector3): boolean {
+    const s = this.sectorAt((a.z + b.z) / 2);
+    return s ? s.hasLineOfSight(a, b) : true;
+  }
+
+  /** Conveyor flow at a position. Zero outside Sector 2's bands. */
+  flowAt(pos: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 {
+    const s = this.sectorAt(pos.z);
+    if (!s) { out.set(0, 0, 0); return out; }
+    return s.flowAt(pos, out);
   }
 
   volumeCentre(v: Volume) { return (this.sectorAt((v.z0 + v.z1) / 2) ?? this.sectors[0]).volumeCentre(v); }

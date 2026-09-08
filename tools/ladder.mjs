@@ -1,12 +1,22 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 import fs from 'node:fs';
 
+/**
+ * Harness output lives in the repository, not in a session-scoped scratch directory.
+ * The old absolute path was tied to the container that wrote it, which meant every gate
+ * in this file silently failed to produce evidence when re-run anywhere else. `.artifacts`
+ * is gitignored, so the outputs are reachable without ever being committed.
+ */
+// import.meta.dirname, not `new URL(...)`: several of these files shadow the global URL.
+const ARTIFACTS = process.env.ARTIFACTS || `${import.meta.dirname}/../.artifacts`;
+const ART = (p) => { fs.mkdirSync(ARTIFACTS, { recursive: true }); return `${ARTIFACTS}/${p}`; };
+
 const RUNS = Number(process.env.RUNS ?? 50);
 const CAP = Number(process.env.CAP ?? 100);          // seconds of simulation per run
 const TIERS = (process.env.TIERS ?? '1,2,3,4,5,6,7,8,9,10').split(',').map(Number);
 // LEVER=corruptedFraction:0 pins one lever across every tier, to attribute a step's cost
 const LEVER = process.env.LEVER ? (([k, v]) => [k, v === 'true' ? true : v === 'false' ? false : Number(v)])(process.env.LEVER.split(':')) : null;
-const OUT = process.env.OUT ?? '/tmp/claude-0/-home-user-AlphaMech/de688b13-e066-5ee1-9c87-f4592d5dd068/scratchpad/ladder.json';
+const OUT = process.env.OUT ?? ART('ladder.json');
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--use-gl=swiftshader','--enable-unsafe-swiftshader','--no-sandbox','--disable-dev-shm-usage'] });
 const page = await browser.newPage({ viewport: { width: 640, height: 400 } });

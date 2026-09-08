@@ -51,6 +51,15 @@ export class Severance extends Enemy {
   }
 
   get structure01() { return this.vitals.structure / this.vitals.structureMax; }
+  get bossName() { return 'SEVERANCE'; }
+  /** ACE: nothing is gated. The whole fight is the read. */
+  get gated() { return false; }
+  hudLine() {
+    const next = this.phase === 1
+      ? `COUNTER-VANISH ON VANISH ${(Math.floor(this.vanishesTaken / T.counterVanishP1Every) + 1) * T.counterVanishP1Every}`
+      : `COUNTER-VANISH ${(T.counterVanishP2Chance * 100) | 0}% · CD ${T.counterVanishP2Cooldown.toFixed(1)}s`;
+    return `VANISHES ${this.vanishesTaken} · COUNTERS ${this.counterVanishes} · ${next}`;
+  }
 
   update(dt: number) {
     this.counterCooldown = Math.max(0, this.counterCooldown - dt);

@@ -30,7 +30,12 @@ export interface Hostile {
 }
 
 export type HostileState = 'approach' | 'orbit' | 'windup' | 'strike' | 'recover' | 'evade' | 'staggered' | 'dead';
-export type DamageSource = 'rifle' | 'blade' | 'missile' | 'pile' | 'rally' | 'upgrade' | 'environment' | 'clone';
+/**
+ * `breach` and `phase` are their own sources rather than flavours of `blade`/`pile` because
+ * armour plates test the source directly: BREACH DRIVER destroys a plate, PHASE BLADE ignores
+ * one. A plate that could be out-damaged by any weapon would not be a plate.
+ */
+export type DamageSource = 'rifle' | 'blade' | 'missile' | 'pile' | 'rally' | 'upgrade' | 'environment' | 'clone' | 'breach' | 'phase' | 'contrail';
 
 /** What a hostile needs to know about the thing it is pressuring. Kept minimal so the Director
  *  can pressure a static objective instead of the player (GDD §17). */
@@ -42,4 +47,9 @@ export interface PressureTarget {
   forward(): THREE.Vector3;
   /** Hostiles call this to deal damage; the player implements mitigation and upgrade hooks. */
   receiveHit(damage: number, impact: number, from: Hostile | null, attack: string): void;
+  /**
+   * HOOK's harpoon. The only channel through which a hostile may move the pilot, kept on the
+   * interface so it is one auditable entry point rather than enemies writing `player.pos`.
+   */
+  applyPull(dir: THREE.Vector3, distance: number): void;
 }

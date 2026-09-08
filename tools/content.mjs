@@ -56,9 +56,11 @@ const out = await page.evaluate(() => {
 
   // ---- PREDATOR READ
   arena('U4', 'vector', ['predator-read']);
-  R['predator-read'] = { window: g.player.mods.vanishWindow, lead: g.player.mods.telegraphLead, ctxLead: g.ctx.telegraphLead };
+  g.hostiles.length = 0; window.__dev.spawn('lancer', 1);
   g.tick(1/60);
-  R['predator-read'].ctxLeadAfterTick = g.ctx.telegraphLead;
+  // leadFor() is per-hostile now (PREDATOR READ is global, SENSOR BLOOM is lock-scoped), so the
+  // probe asks the context about an actual frame rather than reading a global field.
+  R['predator-read'] = { window: +g.player.mods.vanishWindow.toFixed(3), lead: g.player.mods.telegraphLead, leadForHostile: g.ctx.leadFor(g.hostiles[0]) };
 
   // ---- SPLIT LOCK
   arena('U5', 'vector', ['split-lock']);
@@ -139,10 +141,23 @@ const out = await page.evaluate(() => {
   R['momentum-railgun'] = { chargeAtRest: +blocked.toFixed(2), readyAtRest, speedNow: Math.round(g.player.speed), firedWhileMoving: fired, damage: Math.round(hpB - g.hostiles[0].vitals.structure) };
   arena('E3', 'vector', [], [['seismic-driver', 'pile']]);
   g.hostiles.length = 0; window.__dev.spawn('lancer', 3);
-  for (const x of g.hostiles) x.pos.copy(g.player.pos).setY(g.player.pos.y);
+  // Seat the hostiles UNDER the player and hold them there while the driver falls: the previous
+  // probe placed them once and then measured, so any residual drift from the frame before moved
+  // the hostiles out of the shockwave and the row read 0 for a mechanic that works.
+  g.player.pos.y += 40;
+  const seat = () => { for (const x of g.hostiles) { x.pos.x = g.player.pos.x; x.pos.z = g.player.pos.z; x.vel.set(0, 0, 0); } };
+  seat();
   const hps = g.hostiles.map((x) => x.vitals.structure);
-  g.player.pos.y += 40; step(1, ['2']); step(90);
-  R['seismic-driver'] = { damaged: g.hostiles.map((x, i) => Math.round(hps[i] - x.vitals.structure)) };
+  let landed = false;
+  for (let i = 0; i < 160; i++) {
+    seat();
+    g.input.scripted = { down: i < 3 ? ['2'] : [], look: [0, 0] };
+    g.tick(1 / 60);
+    if (g.hostiles.some((x, k) => x.vitals.structure < hps[k])) { landed = true; break; }
+  }
+  g.input.scripted = null;
+  step(4);
+  R['seismic-driver'] = { landed, damaged: g.hostiles.map((x, i) => Math.round(hps[i] - x.vitals.structure)), directExpected: 900, shockwaveExpected: 320 };
   arena('E4', 'vector', [], [['tether-blade', 'blade']]);
   g.hostiles.length = 0; window.__dev.spawn('lancer', 1);
   g.hostiles[0].pos.copy(g.player.pos); g.hostiles[0].pos.z += 120;

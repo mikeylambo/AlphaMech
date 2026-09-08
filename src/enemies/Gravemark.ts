@@ -172,6 +172,14 @@ export class Gravemark extends Enemy {
 
   get structure01() { return this.vitals.structure / this.vitals.structureMax; }
   get liveRelays() { return this.relays.filter((r) => r.alive); }
+  get bossName() { return 'GRAVEMARK'; }
+  get gated() { return this.screened; }
+  hudLine() {
+    const pips = Array.from({ length: Gravemark.MAX_RELAYS }, (_, i) => (i < this.screening ? '■' : i < this.liveRelays.length ? '□' : '·')).join(' ');
+    return this.screened
+      ? `SCREENED — ${pips}  ${this.screening}/${Gravemark.SCREEN_THRESHOLD} RELAYS IN REAR ARC · ROTATE THE FORMATION`
+      : `EXPOSED — ${pips}  ${this.screening}/${Gravemark.SCREEN_THRESHOLD} IN REAR ARC · HIT IT NOW`;
+  }
 
   /** Spawn the opening escort. Called once, when the encounter begins. */
   deployEscort() {

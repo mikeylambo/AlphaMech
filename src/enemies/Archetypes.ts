@@ -5,7 +5,7 @@ import { MechPalette } from '../entities/Materials';
  * Attack weights are explicit percentages — the "lunge, lunge, sweep" of earlier drafts was
  * weighting, not a typo.
  */
-export type AttackId = 'volley' | 'lance' | 'lunge' | 'sweep' | 'mortar' | 'strafe-run' | 'mine-drop' | 'shield-advance' | 'quake';
+export type AttackId = 'volley' | 'lance' | 'lunge' | 'sweep' | 'mortar' | 'strafe-run' | 'mine-drop' | 'shield-advance' | 'quake' | 'scatter' | 'harpoon' | 'pour';
 
 export interface AttackSpec {
   id: AttackId;
@@ -16,7 +16,7 @@ export interface AttackSpec {
   damage: number;
   impact: number;
   /** How the strike resolves. Behaviour column of GDD §7. */
-  kind: 'burst' | 'beam' | 'melee' | 'arc' | 'aoe' | 'pass' | 'mine' | 'advance';
+  kind: 'burst' | 'beam' | 'melee' | 'arc' | 'aoe' | 'pass' | 'mine' | 'advance' | 'scatter' | 'harpoon';
   notes: string;
 }
 
@@ -30,14 +30,23 @@ export const ATTACKS: Record<AttackId, AttackSpec> = {
   'mine-drop': { id: 'mine-drop', label: 'MINE DROP', windup: 0.80, recovery: 0.65, telegraph: 10, damage: 280, impact: 180, kind: 'mine', notes: 'arms after 0.55s · 10m trigger · persists 8.0s' },
   'shield-advance': { id: 'shield-advance', label: 'SHIELD ADVANCE', windup: 1.10, recovery: 0.90, telegraph: 22, damage: 260, impact: 300, kind: 'advance', notes: 'advances 22m behind the frontal shield; contact damage along the path' },
   quake: { id: 'quake', label: 'QUAKE', windup: 1.60, recovery: 1.20, telegraph: 34, damage: 480, impact: 420, kind: 'aoe', notes: 'ground shock, radius grows over the windup' },
+  // v0.3 — SECTOR 2
+  scatter: { id: 'scatter', label: 'SCATTER', windup: 0.85, recovery: 0.70, telegraph: 18, damage: 240, impact: 200, kind: 'scatter', notes: 'six-round fan, wide spread, short range' },
+  harpoon: { id: 'harpoon', label: 'HARPOON', windup: 1.20, recovery: 0.95, telegraph: 11, damage: 180, impact: 240, kind: 'harpoon', notes: 'pulls the pilot 30m toward the firer' },
+  pour: { id: 'pour', label: 'POUR', windup: 1.45, recovery: 1.05, telegraph: 30, damage: 420, impact: 300, kind: 'aoe', notes: 'molten pour along the casting line; the floor stays hot' },
 };
+
+/** HOOK specifics (RC brief §2.1). The one enemy that moves YOU. */
+export const HARPOON = { pull: 30, speed: 210 };
+/** SPLITTER specifics (RC brief §2.1). Structure of each shard, and how far they part. */
+export const SPLIT = { shardStructure: 1200, shardImpactMax: 420, separation: 26 };
 
 /** Mine Drop specifics (GDD §7). */
 export const MINE = { armTime: 0.55, trigger: 10, life: 8.0 };
 /** Shield Advance specifics (GDD §7). */
 export const SHIELD_ADVANCE = { distance: 22, speed: 30 };
 
-export type ArchetypeId = 'lancer' | 'brawler' | 'sentry' | 'harrier' | 'warden' | 'relay';
+export type ArchetypeId = 'lancer' | 'brawler' | 'sentry' | 'harrier' | 'warden' | 'relay' | 'splitter' | 'hook';
 export type BossId = 'severance';
 
 export interface Archetype {
@@ -73,6 +82,8 @@ export const ARCHETYPE_PALETTES: Record<ArchetypeId, MechPalette> = {
   harrier: P(0x4a4450, 0x2a2630, 0x16141a, 0x6b6674, 0x221f28, 0xc07aff, 0xd08aff),
   warden: P(0x413f3a, 0x262522, 0x151413, 0x6a675f, 0x201f1c, 0xffc247, 0xffd06a),
   relay: P(0x33404a, 0x1e262c, 0x12171a, 0x5f6b74, 0x1c2226, 0x4ad0c0, 0x5ae8d4),
+  splitter: P(0x45414a, 0x27242c, 0x151318, 0x6a6672, 0x1f1d23, 0xa8f04a, 0xb8ff5a),
+  hook: P(0x4a3c3a, 0x2b2322, 0x171312, 0x6f625f, 0x231d1c, 0xff5ad0, 0xff7ae0),
 };
 
 export const ARCHETYPES: Record<ArchetypeId, Archetype> = {
@@ -112,6 +123,38 @@ export const ARCHETYPES: Record<ArchetypeId, Archetype> = {
     attacks: [{ id: 'shield-advance', weight: 50 }, { id: 'quake', weight: 50 }],
     flying: false, cruiseAltitude: 0, frontalShield: true, palette: ARCHETYPE_PALETTES.warden, chassis: 'heavy',
   },
+  /**
+   * SPLITTER — forces target switching. On stagger it splits into two shards holding their own
+   * bearings, so a single hostile becomes two BEARINGS: the arc widens as a direct consequence
+   * of your own success. The only frame in the roster that punishes a clean stagger.
+   */
+  splitter: {
+    id: 'splitter', name: 'SPLITTER', structure: 3000, impactMax: 700, band: [60, 110], speed: 52, accel: 170, scale: 0.98,
+    attacks: [{ id: 'volley', weight: 45 }, { id: 'scatter', weight: 55 }],
+    flying: false, cruiseAltitude: 0, frontalShield: false, palette: ARCHETYPE_PALETTES.splitter, chassis: 'standard',
+  },
+  /**
+   * HOOK — alters your trajectory. It fires a harpoon that pulls you 30m toward it, which means
+   * it can drag you back into the middle of a formation you had just escaped. Law II is a
+   * positioning problem; HOOK is the frame that argues with your positioning directly.
+   */
+  hook: {
+    id: 'hook', name: 'HOOK', structure: 3600, impactMax: 900, band: [25, 70], speed: 58, accel: 200, scale: 1.02,
+    attacks: [{ id: 'harpoon', weight: 55 }, { id: 'sweep', weight: 45 }],
+    flying: false, cruiseAltitude: 0, frontalShield: false, palette: ARCHETYPE_PALETTES.hook, chassis: 'standard',
+  },
+};
+
+/**
+ * A SPLITTER shard. Not a roster entry — it only ever exists because a SPLITTER was staggered,
+ * so it is derived from the parent rather than authored beside it. Structure and impact max are
+ * the shard values from the brief; everything else is the parent, faster and smaller.
+ */
+export const SHARD: Archetype = {
+  id: 'splitter', name: 'SHARD', structure: SPLIT.shardStructure, impactMax: SPLIT.shardImpactMax,
+  band: [45, 95], speed: 66, accel: 210, scale: 0.62,
+  attacks: [{ id: 'volley', weight: 60 }, { id: 'scatter', weight: 40 }],
+  flying: false, cruiseAltitude: 0, frontalShield: false, palette: ARCHETYPE_PALETTES.splitter, chassis: 'standard',
 };
 
 export const ARCHETYPE_IDS = Object.keys(ARCHETYPES) as ArchetypeId[];
