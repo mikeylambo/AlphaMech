@@ -840,3 +840,133 @@ composition ceiling, reinforcement pacing and wave count, which move structure-r
 vanish opportunities at every tier — with forward bias and spawn spread widening the arc from
 the middle of the ladder upward, where they actually bite.
 
+### Second authoritative run, on the fixed code — the ladder SEPARATES but the gate still FAILS
+
+| TIER | CLEAR | MEAN ARC | MEAN TOKENS | PV OPP/MIN | STRUCTURE LEFT |
+|---|---|---|---|---|---|
+| I | 100% | 59.7° | 1.002 | 22.5 | 8653 |
+| II | 100% | 81.0° | 1.009 | 25.8 | 8432 |
+| III | 100% | 85.1° | 1.015 | 26.0 | 8297 |
+| IV | 100% | 101.3° | 1.030 | 28.5 | 8039 |
+| V | 91% | 112.2° | 1.053 | 29.5 | 7666 |
+| VI | 48% | 120.3° | 1.067 | 30.1 | 7456 |
+| VII | 52% | 123.3° | 1.079 | 30.5 | 7119 |
+| VIII | 8% | 136.7° | 1.113 | 31.6 | 7232 |
+| IX | 0% | 149.9° | 1.152 | 32.8 | 6906 |
+| X | 0% | 153.8° | 1.161 | 32.2 | 7283 |
+
+```
+ALL ADJACENT PAIRS SEPARATED : PASS (9/9)
+MONOTONIC CLEAR-RATE DECLINE : FAIL   (VI 48% → VII 52%)
+```
+
+Mean arc now climbs monotonically across the whole ladder — **59.7° → 153.8°** — and mean tokens
+with it, 1.002 → 1.161. That is the retune working: the tiers are doing the thing the design says
+they do, which is widen the encirclement and let a second attack token out more often.
+
+**But the gate does not pass, and two things are wrong.**
+
+### Defect 1 — the harness measured empty arenas
+
+`__dev.skipToLabel()` teleports the pilot into the encounter volume. A settle loop added during
+this pass (wait for the first wave, discard a run that never gets one) revealed that a large
+fraction of runs never stage a fight at all:
+
+```
+tier  I  II III IV  V  VI VII VIII IX  X
+void  0   0   0  0   3   8   8   11  11 11      (of 50)
+```
+
+Runs that never staged were previously **counted as clears**. A measurement in which up to a
+fifth of the sample is an empty arena is not a measurement, and every ladder number taken before
+the settle loop — including the first authoritative table above — is contaminated by it. The
+staging path itself is sound in normal play (`tools/pilot.mjs` and `tools/variants.mjs` enter and
+clear every state); it is the teleport-and-measure path that is unreliable.
+
+### Defect 2 — the instrument is not reproducible across invocations
+
+Two runs of `tools/ladder.mjs`, no code change between them, disagree on FALL I by up to **4° of
+mean arc and ~120 structure** — the same magnitude as the separation thresholds the gate uses
+(1.0° and 120). Adjacent-pair verdicts near those thresholds therefore cannot be trusted, which
+is exactly why one measurement reported 9/9 separated and the next reported 8/9 with tiers I–IV
+byte-identical in definition.
+
+Ruled out by direct probe, each with its own instrumented test: procedural setup signature, all
+seven RNG stream cursors, encounter volume geometry, player spawn state, look accumulation,
+wall-clock in the sector builder, real frames elapsing between evaluate calls, and the page's
+boot seed. Within a single page, back-to-back runs of one seed are **bit-identical after the
+first**; the variance enters in the first run after boot and does not wash out.
+
+Three real defects were found and fixed along the way, and they stand on their own:
+
+1. **`SectorWorld.pump()` was wall-clock bounded.** How much of the next sector existed on a
+   given frame depended on machine load, and `confine()` clamps against the first and last
+   resident volume — so a busy machine produced a different fight. This is a genuine determinism
+   defect in shipped code, introduced by §3.4 and not caught by `tools/loop.mjs` because that
+   gate's run never queues a second sector. Now a fixed step count: deterministic, *cheaper*
+   than the 3.5ms budget it replaced, and a 16-volume sector still completes in about a quarter
+   of a second.
+2. **Scripted input accumulated onto real input** rather than replacing it, so the first scripted
+   frame folded in whatever the mouse had contributed beforehand.
+3. **Dev teleports skipped the encounter-entry reset**, leaving locomotion state from wherever
+   the frame came from.
+
+### Verdict
+
+**§3.1 — FAIL.** Not because the ladder is wrong: it separates 9/9 on five metrics and its arc
+and token curves are monotone across all ten tiers. It fails because **non-negotiable 9 requires
+the ladder to be measured, and the instrument is not yet trustworthy enough to measure it.**
+Reporting PASS here would be asserting the ladder, which is the exact thing rule 9 forbids.
+
+What has to happen before this can be re-gated, in order:
+
+1. Make `skipToLabel` stage the encounter deterministically, so no run is measured in an empty
+   arena. Assert `startHostiles > 0` in the harness rather than discarding after the fact.
+2. Find the first-run-after-boot residue. The bisect is already written
+   (`scratchpad/rep3.mjs` pattern: signature per frame, first diverging frame) and the divergence
+   is stable and reproducible, so it is findable — it was a budget decision to stop, not a dead end.
+3. Re-measure, and expect the VI → VII inversion (48% → 52%) to resolve or to become a real
+   tuning item once the sample is clean.
+
+---
+
+## 21. §3 scope table — item by item
+
+| § | Item | Verdict | Evidence |
+|---|---|---|---|
+| **3.0** | Hardware profile: frame p50/p95/worst, draws, tris, programs, GPU memory, at 5 hostiles and at a volume crossing; state the budget FALL X must fit inside | **BLOCKED (instrument delivered) · CPU half PASS** | `tools/profile.mjs`, `npm run profile`. This container has no GPU at all (`/dev/dri` absent, no VGA device, no Vulkan ICD), so every render figure is a SwiftShader floor and is reported as such rather than dressed up as a profile. The CPU half is real and portable: **simulation p95 never exceeds 0.5ms**, leaving **16.17ms** of a 60fps frame to the renderer. §17 |
+| **3.1** | Ten FALL tiers using only the permitted levers, with a 50-runs-per-tier validation harness | **FAIL** | Ten tiers exist, use only permitted levers, and separate **9/9** adjacent pairs on five metrics with mean arc climbing 59.7° → 153.8°. The gate fails on two counts: the harness measured empty arenas for up to a fifth of its sample, and it is not reproducible across invocations. Rule 9 forbids asserting a ladder, so this is reported as FAIL with the defect named. §20 |
+| **3.2** | GRAVEMARK + RELAY; the seed picks SEVERANCE or GRAVEMARK | **PASS** | Chasing escorts: **0/6** wins, 15 escorts killed, commander taken from 26,000 to 25,886. Rotating the commander: **6/6**, 4 escorts killed. Both policies end on near-identical structure — the difference is comprehension, not execution. §14, §19 |
+| **3.3** | 24 encounter variants, four per state | **PASS** | 24/24 reachable and playable, each resolving on its own terms, with field activity observable per row so a silently-degraded variant cannot pass unnoticed. §13, §19 |
+| **3.4** | Build the next sector while playing the current; retire the previous; never more than two resident; preserve the run | **PASS** | Max resident **2**, residency 1→2→1→2→1 across three chained Sector 1 instances, geometry released at every boundary, draws flat 112–204, run state and all seven stream cursors carried intact. §11, §19. *A wall-clock dependency in the incremental builder was found and fixed during §3.1's investigation — see §20.* |
+| **3.5** | Authored onboarding, the first 100 seconds | **PASS** | Eight beats, each condition-gated; the token count the player is **shown** goes 1 → 2 → 1, with the flank held at 235–263° for 2s. Offered on the title screen, nudged on first launch, never forced. §15, §19 |
+| **3.6** | Accessibility foundation | **PASS** | 10 assist rows, 11 rebindable actions across keyboard/mouse/pad with conflict detection, persistence across reload, and the assist snapshot reaching `RunState` and the results card. §16, §19 |
+
+### Non-negotiables
+
+| # | Rule | Verdict |
+|---|---|---|
+| 1–6 | The Alpha's six | **PASS** — re-run in full under the Regression Rule, §19 |
+| **7** | Difficulty may never alter damage, structure, or the arc thresholds | **PASS** — enforced structurally (`FallTier` has no such field) and proven at runtime: arc thresholds and player structure identical at all ten tiers, `damageLevers: []`, `structureLevers: []`, elite LANCER structure 3400 = plain LANCER 3400 |
+| **8** | Every assist recorded in `RunState` and surfaced on results, written even when all are off | **PASS** — `settings.snapshot()` is called unconditionally at `run.begin()`; the results card prints `ALL ASSISTS OFF` when default |
+| **9** | The ladder must be measured, not asserted | **HELD, AND IT FAILED THE BUILD TWICE** — first by exposing an oracle pilot that cleared 100% at every tier, then by exposing an instrument that measured empty arenas. Both are recorded rather than smoothed over. The rule did its job; the ladder is not yet through it |
+
+---
+
+## 22. Definition of done, walked
+
+| Claim | Status |
+|---|---|
+| Four sectors are architecturally reachable | **Yes.** Residency is capped at two by construction, sectors are built incrementally under a per-frame budget while the previous one is played, and three chained instances were run end to end with the run state intact. The cost of a fourth sector is the cost of the first |
+| The arc rule is sovereign, at every difficulty | **Yes.** `tokenCount` remains a getter over a pure function; `FallTier` has no damage, structure or threshold field; elites are behavioural modifiers with no stat surface |
+| The game has systemic ceiling | **Yes, and it is now measurable.** 24 variants, 10 tiers, 2 bosses, 12 corrupted upgrades with permanent downsides, 5 elite behaviours. Mean encirclement arc climbs 59.7° → 153.8° across the ladder and mean simultaneous tokens with it — the pressure the design promises is observable, not asserted |
+| The difficulty ladder is proven distinct | **No.** It separates 9/9 on five metrics, but the instrument that says so is not yet trustworthy. See §20 |
+| It fits a frame budget | **Half-answered.** Simulation p95 ≤ 0.5ms leaves 16.17ms for the renderer at 60fps. The GPU half needs `npm run profile -- --headful` on real silicon |
+| Nothing an earlier gate proved was broken | **Yes.** Every Alpha gate re-run and passing, §19 — including after the three determinism fixes of §20 |
+
+### The one-line summary
+
+The Ceiling Pass delivered six of seven scope items and the seventh's implementation, and the
+system that was supposed to catch a fake difficulty ladder caught one — twice. That is the
+result: **not a clean sweep, and the failure is the useful part.**
+
