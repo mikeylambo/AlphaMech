@@ -646,3 +646,133 @@ archetype or a heavier VFX pass now has to be measured against rather than guess
 | `tools/gmprobe.mjs` | The instrument that found the tautological screen test — kept, because the next formation boss will need it |
 | `tools/onboarding.mjs` | Checkpoint F. A scripted first-timer plays the orientation; the token count they were *shown* is asserted 1 → 2 → 1 |
 
+---
+
+## 19. Checkpoint results (v0.2)
+
+Sections are named by the scope item they prove. Where the brief's checkpoint letter is
+unambiguous it is stated: **A** — the hardware profile (§17), **C** — the measured ladder (§20),
+**F** — the 0:35 → 0:50 beat (below).
+
+### §3.4 — the sector lifecycle (`tools/lifecycle.mjs`, three chained Sector 1 instances)
+
+| Mark | Resident | Sectors | Volumes | Geom | Draws | Built | Retired | Carried |
+|---|---|---|---|---|---|---|---|---|
+| S1 start | 1 | 1 | 18 | 90 | 125 | 1 | 0 | 0/0/0 |
+| S1 mid (post-forge) | 1 | 1 | 18 | 146 | 138 | 1 | 0 | 1/1/0 |
+| S1 boss | 1 | 1 | 18 | 277 | 204 | 1 | 0 | 1/1/0 |
+| **boundary 1→2** | 1 | 2 | 16 | 190 | 113 | 2 | 1 | 1/1/1 |
+| S2 mid | **2** | 2,3 | 33 | 205 | 124 | 3 | 1 | 1/1/1 |
+| S2 boss | **2** | 2,3 | 33 | 205 | 122 | 3 | 1 | 1/1/1 |
+| **boundary 2→3** | 1 | 3 | 17 | 111 | 112 | 3 | 2 | 1/1/1 |
+| S3 mid | 1 | 3 | 17 | 111 | 120 | 3 | 2 | 1/1/1 |
+| S3 boss | 1 | 3 | 17 | 111 | 121 | 3 | 2 | 1/1/1 |
+
+**MAX RESIDENT SECTORS: 2 — PASS.** Residency walks 1 → 2 → 1 → 2 → 1 as the next sector is
+built during play and the previous one is retired at the boundary. Geometry ranges 90–277 and
+comes back down at every boundary, so it is genuinely released rather than merely hidden. Draws
+stay flat at 112–204 across all three sectors. Built 3, retired 2. Upgrades, evolutions, encounter
+scores, the pilot profile and all seven stream cursors carry through. Console clean.
+
+### Non-negotiable 7 at runtime (`tools/fallcheck.mjs`)
+
+```
+arc thresholds identical at every tier : true  (145° / 235° / 275°)
+player structure identical at every tier: true  (9000)
+damage levers                          : []
+structure levers                       : []
+```
+
+Tier levers actually reaching the simulation:
+
+```
+FALL I    cooldown 1.50s  bias 0.18  ceiling  4  async false  elites 0  corrupted   0%
+FALL V    cooldown 1.35s  bias 0.36  ceiling  5  async true   elites 0  corrupted   0%
+FALL VII  cooldown 1.20s  bias 0.54  ceiling  7  async true   elites 1  corrupted   0%
+FALL X    cooldown 1.00s  bias 0.92  ceiling 10  async true   elites 3  corrupted 100%
+```
+
+Corrupted offers by tier — `◆` marks the permanent downside attached to the card:
+
+```
+FALL  1: execution-protocol         zero-point-reactor              chain-read
+FALL  8: execution-protocol         zero-point-reactor◆(flank-debt) chain-read◆(en-ceiling)
+FALL 10: execution-protocol◆(vanish-window)  zero-point-reactor◆(flank-debt)  chain-read◆(en-ceiling)
+```
+
+Elites are behavioural only, measured side by side in one encounter:
+
+```
+lancer  elite=ANCHOR    structure=3400  impactMax= 620
+lancer  elite=PHASED    structure=3400  impactMax= 620
+sentry  elite=VECTORED  structure=5200  impactMax=1050
+warden  elite=null      structure=7800  impactMax=1900
+```
+
+An elite LANCER and a plain LANCER are the same 3400 structure and the same 620 impact. **PASS.**
+
+### §3.3 — the 24 variants (`tools/variants.mjs`)
+
+**REACHABLE AND PLAYABLE: 24/24.** Every variant is entered, its field layer engages, and it
+resolves on its own terms — `clear`, `reach-exit`, `intercept` or `destroy-targets`. Console clean.
+Field activity is observable per row (`emit` hazard-grid pulses, `rot` rotors, `drain` EN vents,
+`void` dropping-floor sectors, `wake`), so a variant that silently degraded to its baseline would
+show up as a row of zeroes rather than pass unnoticed.
+
+The three hazard variants after the 1.1s cadence cap: `storm-grid` 8760, `storm-collapse` 8460,
+`hunt-descent` 8040 structure remaining. Before the cap, two of those were a full frame to zero
+in about four seconds.
+
+### §3.2 — GRAVEMARK (`tools/gravemark.mjs`, 6 seeds per policy, same fight)
+
+| Policy | Boss down | Boss structure left | Damage dealt | Damage refused | Exposed % | Relay kills | Player HP |
+|---|---|---|---|---|---|---|---|
+| **chaser** — fight the escorts, never the commander | **0/6** | 100% | 114 | 2,356 | 95% | 15.0 | 8,525 |
+| **rotator** — orbit hard, hit whenever the screen drops | **6/6** | 0% | 20,863 | 24,676 | 55% | 4.0 | 8,592 |
+
+The chaser kills **15 escorts** across a fight and takes the commander from 26,000 to 25,886. It
+is not losing to damage — it ends on 8,525 structure — it is losing because killing escorts is
+not the answer to a screen that respawns them. The rotator kills **4** and wins every time.
+
+Both policies take almost identical damage, which is the point: the difference between them is
+comprehension, not execution.
+
+### Checkpoint F — the first 100 seconds (`tools/onboarding.mjs`)
+
+```
+ENTRY POINT     ORIENTATION present · nudged on first launch
+BEATS           launch → first-kill → two-in-front → flanked → rotate → vanish → convert → launch-out
+```
+
+The token count the player was **shown**:
+
+```
+  two-in-front   ARC     0-57°   TOKENS 1   held 4.80s
+  flanked        ARC   235-263°  TOKENS 2   held 2.00s
+  rotate         ARC   144-233°  TOKENS 1   held 0.28s
+```
+
+```
+TOKEN TRANSITIONS      1 → 2(flanked) → 1(rotate)
+1 BEFORE THE FLANK     true
+2 ON THE FLANK         true
+1 AFTER THE ROTATE     true
+ALL EIGHT BEATS TAUGHT true
+CHECKPOINT F           PASS
+```
+
+### Alpha gates re-run under the Regression Rule
+
+Every Alpha checkpoint was re-run against the v0.2 build. Nothing an earlier gate proved was
+allowed to break.
+
+| Alpha gate | v0.2 result |
+|---|---|
+| `tools/loop.mjs` — determinism | **PASS** — identical procedural setup, identical execution trace, identical final stream states |
+| `tools/arena.mjs` — a 5-hostile ARENA is losable | **PASS** — naive pilot (hold fire, walk forward) dies at 120s with 3 hostiles standing; fully passive pilot dies at 60s. `tokenSource` observed at both thresholds: `227.6° <= 235° -> 1` and `244.4° > 235° -> 2` |
+| `tools/pilot.mjs` — every state is winnable | **PASS** — ARENA 8620 · DUEL 9000 · STORM 9000 · HUNT 8520 · PURSUIT 9000 · SEVERANCE 9000, all cleared |
+| `tools/full.mjs` — whole loop end to end | **PASS** — title → HUNT → vanish → rally win, escalation and loss → FORGE → LAUNCH → **GRAVEMARK** (the seed picked it) → phase 2 with the screen broken (1 of 4 relays screening, 974 refused vs 900 taken) → results. Console clean |
+| `tools/forge2.mjs` — FORGE 1 offers 4 evolutions, FORGE 2 offers 3 | **PASS** — classifier coverage unchanged across the pool |
+| `tools/content.mjs` — every reactor, upgrade and evolution measured | **PASS** — all 18 rows match their GDD values, including the ones the corrupted variants now scale |
+| `tools/settings.mjs` — §3.6 | **PASS** — 10 assist rows, 11 rebindable actions, persistence across reload, and the assist snapshot reaching `RunState` |
+
