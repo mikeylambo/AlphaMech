@@ -964,6 +964,26 @@ What has to happen before this can be re-gated, in order:
 | It fits a frame budget | **Half-answered.** Simulation p95 ≤ 0.5ms leaves 16.17ms for the renderer at 60fps. The GPU half needs `npm run profile -- --headful` on real silicon |
 | Nothing an earlier gate proved was broken | **Yes.** Every Alpha gate re-run and passing, §19 — including after the three determinism fixes of §20 |
 
+### Regression re-run after the three determinism fixes of §20
+
+Every gate re-run against the changed `Input.ts`, `ChainWorld.ts` and `Game.ts`:
+
+```
+loop         SAME PROCEDURAL SETUP true · SAME EXECUTION TRACE true · STREAM STATES EQUAL true
+pilot        ARENA 9000 · DUEL 9000 · STORM 9000 · HUNT 8860 · PURSUIT 9000 · SEVERANCE 9000, all cleared
+full         whole loop, console clean
+continuity   WORLD BUILDS 1 · worst frame at a crossing 242.8ms
+lifecycle    MAX RESIDENT SECTORS 2 PASS
+fallcheck    arc thresholds identical · structure identical 9000 · damage levers [] · structure levers []
+variants     24/24
+gravemark    chaser 0/6 · rotator 6/6
+onboarding   CHECKPOINT F PASS
+settings     10 assist rows · 11 bind rows · assists reach RunState
+```
+
+Nothing an earlier gate proved was broken. `tools/pilot.mjs` improved — ARENA now clears on full
+structure — because scripted input no longer inherits stray real-mouse look.
+
 ### The one-line summary
 
 The Ceiling Pass delivered six of seven scope items and the seventh's implementation, and the
