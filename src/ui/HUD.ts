@@ -10,6 +10,8 @@ import { EncounterId, ENCOUNTERS } from '../director/Encounters';
 import { HARDPOINT_ORDER, HARDPOINTS, EVOLUTIONS, EvolutionId, HardpointId } from '../build/Weapons';
 import { RunState } from '../build/RunState';
 import { Severance } from '../enemies/Severance';
+import type { Beat } from '../director/Onboarding';
+import { Gravemark } from '../enemies/Gravemark';
 
 /**
  * The instrument panel. Its whole job is Law II: make the shape of the formation around you
@@ -84,10 +86,11 @@ export class HUD {
       </div>
       <div id="transit"><div class="k mono" id="trK">CONDUIT</div><div class="t" id="trT">NO LOADING BREAK</div><div class="s mono" id="trS"></div></div>
       <div id="padHint" class="mono">GAMEPAD ACTIVE</div>
+      <div id="tutorial"><div class="p" id="tutPrompt"></div><div class="h mono" id="tutHint"></div><div class="s mono">ESC TO SKIP</div></div>
     `;
     parent.appendChild(this.root);
 
-    for (const id of ['bChain', 'bState', 'bStress', 'bProg', 'objMain', 'objSub', 'vStruct', 'vStructFill', 'vStructGhost', 'vImpact', 'vImpactFill', 'vEnergy', 'vEnergyFill', 'enSegs', 'sState', 'sStreak', 'targets', 'arcLine', 'tokenLine', 'reticle', 'flash', 'slowfx', 'hitfx', 'rally', 'rallyKey', 'rallyArc', 'rallyMode', 'rallyCount', 'rallyPips', 'bossbar', 'bossFill', 'bossPhase', 'bossCV', 'transit', 'trK', 'trT', 'trS', 'toasts', 'padHint', 'hardpoints'])
+    for (const id of ['tutorial', 'tutPrompt', 'tutHint', 'bChain', 'bState', 'bStress', 'bProg', 'objMain', 'objSub', 'vStruct', 'vStructFill', 'vStructGhost', 'vImpact', 'vImpactFill', 'vEnergy', 'vEnergyFill', 'enSegs', 'sState', 'sStreak', 'targets', 'arcLine', 'tokenLine', 'reticle', 'flash', 'slowfx', 'hitfx', 'rally', 'rallyKey', 'rallyArc', 'rallyMode', 'rallyCount', 'rallyPips', 'bossbar', 'bossFill', 'bossPhase', 'bossCV', 'transit', 'trK', 'trT', 'trS', 'toasts', 'padHint', 'hardpoints'])
       this.els[id] = $(id);
 
     this.radar = $('radar') as HTMLCanvasElement;
@@ -137,6 +140,14 @@ export class HUD {
     this.els.bProg.appendChild(h('i', 'now'));
   }
 
+  /** The authored opening's prompt. Deliberately large, deliberately short. */
+  setTutorial(beat: Beat | null) {
+    this.els.tutorial.classList.toggle('on', !!beat);
+    if (!beat) return;
+    this.els.tutPrompt.textContent = beat.prompt;
+    this.els.tutHint.textContent = beat.hint;
+  }
+
   setObjective(main: string, sub: string) { this.els.objMain.textContent = main; this.els.objSub.textContent = sub; }
 
   transit(kind: string, title: string, sub: string, on: boolean) {
@@ -161,13 +172,24 @@ export class HUD {
 
   damageFlash() { this.hitT = 1; }
 
-  setBoss(boss: Severance | null) {
+  setBoss(boss: Severance | Gravemark | null) {
     this.els.bossbar.classList.toggle('on', !!boss);
+    this.els.bossbar.classList.toggle('screened', boss instanceof Gravemark && boss.screened);
     if (!boss) return;
     setBar(this.els.bossFill, boss.structure01);
     this.els.bossPhase.textContent = `PHASE ${boss.phase}`;
-    const next = boss.phase === 1 ? `COUNTER-VANISH ON VANISH ${(Math.floor(boss.vanishesTaken / T.counterVanishP1Every) + 1) * T.counterVanishP1Every}` : `COUNTER-VANISH ${(T.counterVanishP2Chance * 100) | 0}% · CD ${T.counterVanishP2Cooldown.toFixed(1)}s`;
-    this.els.bossCV.textContent = `VANISHES ${boss.vanishesTaken} · COUNTERS ${boss.counterVanishes} · ${next}`;
+    const name = this.els.bossbar.querySelector('.n span') as HTMLElement | null;
+    if (name) name.textContent = boss instanceof Gravemark ? 'GRAVEMARK' : 'SEVERANCE';
+    if (boss instanceof Gravemark) {
+      // the readout the fight is actually about: how much of the screen is still in the rear arc
+      const pips = Array.from({ length: Gravemark.MAX_RELAYS }, (_, i) => (i < boss.screening ? '■' : i < boss.liveRelays.length ? '□' : '·')).join(' ');
+      this.els.bossCV.textContent = boss.screened
+        ? `SCREENED — ${pips}  ${boss.screening}/${Gravemark.SCREEN_THRESHOLD} RELAYS IN REAR ARC · ROTATE THE FORMATION`
+        : `EXPOSED — ${pips}  ${boss.screening}/${Gravemark.SCREEN_THRESHOLD} IN REAR ARC · HIT IT NOW`;
+    } else {
+      const next = boss.phase === 1 ? `COUNTER-VANISH ON VANISH ${(Math.floor(boss.vanishesTaken / T.counterVanishP1Every) + 1) * T.counterVanishP1Every}` : `COUNTER-VANISH ${(T.counterVanishP2Chance * 100) | 0}% · CD ${T.counterVanishP2Cooldown.toFixed(1)}s`;
+      this.els.bossCV.textContent = `VANISHES ${boss.vanishesTaken} · COUNTERS ${boss.counterVanishes} · ${next}`;
+    }
   }
 
   // ---------------------------------------------------------------------------- per frame

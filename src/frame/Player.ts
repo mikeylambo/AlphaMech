@@ -12,8 +12,11 @@ import { MechPalette } from '../entities/Materials';
 import { RunState } from '../build/RunState';
 import { REACTORS } from '../build/Reactors';
 import { UPGRADE_VALUES } from '../build/Upgrades';
+import { CORRUPTED_VALUES, DOWNSIDE_VALUES } from '../build/Corrupted';
+import { HardpointId } from '../build/Weapons';
 import { EVOLUTION_VALUES } from '../build/Weapons';
 import { InputManager } from '../core/Input';
+import { settings } from '../core/Settings';
 
 /** The player's saturated, additive palette — the only high-value silhouette on screen. */
 export const PLAYER_PAL: MechPalette = {
@@ -27,6 +30,10 @@ export type PlayerStateLabel = 'STANDBY' | 'BOOST SKATE' | 'QUICK BOOST' | 'ASSA
 /** Modifiers derived from the reactor, upgrades and weapon evolutions. */
 export interface BuildMods {
   structure: number;
+  /** Energy ceiling. Lowered by the EN CEILING corrupted downside. */
+  energyMax: number;
+  /** Disabled for the run by the HARDPOINT LOCKOUT corrupted downside. */
+  lockedHardpoint: HardpointId | null;
   vanishCost: number;
   vanishWindow: number;
   vanishRefunds: boolean;
@@ -46,6 +53,19 @@ export interface BuildMods {
   bladeImpact: number;
   pileCooldown: number;
   impactNeverDecays: boolean;
+  // corrupted-scalable magnitudes
+  railCoreBonus: number;
+  slipstreamDur: number;
+  slipstreamStacksMax: number;
+  vanishRefundAmount: number;
+  lockCapacity: number;
+  weightLocked: number;
+  chainRange: number;
+  chainSlow: number;
+  executionMult: number;
+  cascadeShare: number;
+  bleedEnergy: number;
+  bleedLife: number;
   // evolutions
   tetherBlade: boolean;
   momentumRailgun: boolean;
@@ -55,12 +75,24 @@ export interface BuildMods {
 
 export function defaultMods(): BuildMods {
   return {
-    structure: T.playerStructure, vanishCost: T.vanishCost, vanishWindow: T.vanishWindow, vanishRefunds: false,
+    structure: T.playerStructure, energyMax: T.energyMax, lockedHardpoint: null, vanishCost: T.vanishCost, vanishWindow: T.vanishWindow, vanishRefunds: false,
     cloneDuration: 0, cloneScale: UPGRADE_VALUES.mirrorCloneDamageScale,
     regenGround: T.regenGround, regenAir: T.regenAir,
     railCore: false, slipstream: false, splitLock: false, weightOfAttention: false, chainRead: false,
     executionProtocol: false, cascadeBreak: false, reactorBleed: false, telegraphLead: 0,
     bladeImpact: T.bladeImpact, pileCooldown: T.pileCooldown, impactNeverDecays: false,
+    railCoreBonus: UPGRADE_VALUES.railCoreMaxBonus,
+    slipstreamDur: UPGRADE_VALUES.slipstreamDuration,
+    slipstreamStacksMax: UPGRADE_VALUES.slipstreamMaxStacks,
+    vanishRefundAmount: UPGRADE_VALUES.vanishBatteryGain,
+    lockCapacity: 1,
+    weightLocked: UPGRADE_VALUES.weightLockedDamage,
+    chainRange: UPGRADE_VALUES.chainReadRange,
+    chainSlow: UPGRADE_VALUES.chainReadSlow,
+    executionMult: UPGRADE_VALUES.executionBladeMult,
+    cascadeShare: UPGRADE_VALUES.cascadeBreakShare,
+    bleedEnergy: UPGRADE_VALUES.reactorBleedEnergy,
+    bleedLife: UPGRADE_VALUES.reactorBleedLife,
     tetherBlade: false, momentumRailgun: false, orbitingInterceptors: false, seismicDriver: false,
   };
 }
@@ -136,7 +168,7 @@ export class Player implements PressureTarget {
   forward(): THREE.Vector3 { return new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)); }
   right(): THREE.Vector3 { return new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)); }
   get speed() { return Math.hypot(this.vel.x, this.vel.z); }
-  get energy01() { return this.energy / T.energyMax; }
+  get energy01() { return this.energy / this.mods.energyMax; }
   get altitude() { return this.pos.y - this.ctx.groundAt(this.pos.x, this.pos.z); }
 
   receiveHit(damage: number, impact: number, from: Hostile | null, attack: string) {
@@ -159,6 +191,10 @@ export class Player implements PressureTarget {
   // ------------------------------------------------------------------ build
   applyBuild(run: RunState) {
     const m = defaultMods();
+    // The vanish-window assist sets the BASELINE. Upgrades that move the window keep their
+    // ratio, so PREDATOR READ is still the same tradeoff at every assist level rather than
+    // becoming a trap for players who need a wider read.
+    m.vanishWindow = settings.assists.vanishWindow;
     const reactor = REACTORS[run.reactor];
     m.structure = reactor.structure;
     m.vanishCost = reactor.vanishCost;
@@ -169,20 +205,23 @@ export class Player implements PressureTarget {
     m.bladeImpact = reactor.bladeImpact;
     m.impactNeverDecays = reactor.impactNeverDecays;
 
+    // Corrupted variants amplify the upgrade's own identity and carry exactly one downside.
+    const corrupt = new Set(run.corrupted.map((c) => c.upgrade));
     for (const id of run.upgrades) {
+      const C = corrupt.has(id);
       switch (id) {
-        case 'zero-point-reactor': m.regenGround = UPGRADE_VALUES.zeroPointGroundRegen; m.regenAir = UPGRADE_VALUES.zeroPointAirRegen; break;
-        case 'rail-core': m.railCore = true; break;
-        case 'slipstream': m.slipstream = true; break;
-        case 'mirror-chassis': m.cloneDuration = Math.max(m.cloneDuration, UPGRADE_VALUES.mirrorCloneDuration); break;
-        case 'vanish-battery': m.vanishRefunds = true; break;
-        case 'predator-read': m.telegraphLead = UPGRADE_VALUES.predatorTelegraphLead; m.vanishWindow = UPGRADE_VALUES.predatorVanishWindow; break;
-        case 'split-lock': m.splitLock = true; break;
-        case 'weight-of-attention': m.weightOfAttention = true; break;
-        case 'chain-read': m.chainRead = true; break;
-        case 'execution-protocol': m.executionProtocol = true; break;
-        case 'cascade-break': m.cascadeBreak = true; break;
-        case 'reactor-bleed': m.reactorBleed = true; break;
+        case 'zero-point-reactor': m.regenGround = UPGRADE_VALUES.zeroPointGroundRegen; m.regenAir = C ? CORRUPTED_VALUES.zeroPointAirRegen : UPGRADE_VALUES.zeroPointAirRegen; break;
+        case 'rail-core': m.railCore = true; m.railCoreBonus = C ? CORRUPTED_VALUES.railCoreMaxBonus : UPGRADE_VALUES.railCoreMaxBonus; break;
+        case 'slipstream': m.slipstream = true; m.slipstreamDur = C ? CORRUPTED_VALUES.slipstreamDuration : UPGRADE_VALUES.slipstreamDuration; m.slipstreamStacksMax = C ? CORRUPTED_VALUES.slipstreamMaxStacks : UPGRADE_VALUES.slipstreamMaxStacks; break;
+        case 'mirror-chassis': m.cloneDuration = Math.max(m.cloneDuration, C ? CORRUPTED_VALUES.mirrorCloneDuration : UPGRADE_VALUES.mirrorCloneDuration); m.cloneScale = C ? CORRUPTED_VALUES.mirrorCloneDamageScale : UPGRADE_VALUES.mirrorCloneDamageScale; break;
+        case 'vanish-battery': m.vanishRefunds = true; m.vanishRefundAmount = C ? CORRUPTED_VALUES.vanishBatteryGain : UPGRADE_VALUES.vanishBatteryGain; break;
+        case 'predator-read': m.telegraphLead = C ? CORRUPTED_VALUES.predatorTelegraphLead : UPGRADE_VALUES.predatorTelegraphLead; m.vanishWindow *= UPGRADE_VALUES.predatorVanishWindow / T.vanishWindow; break;
+        case 'split-lock': m.splitLock = true; m.lockCapacity = C ? CORRUPTED_VALUES.splitLockCount : UPGRADE_VALUES.splitLockCount; break;
+        case 'weight-of-attention': m.weightOfAttention = true; m.weightLocked = C ? CORRUPTED_VALUES.weightLockedDamage : UPGRADE_VALUES.weightLockedDamage; break;
+        case 'chain-read': m.chainRead = true; m.chainRange = C ? CORRUPTED_VALUES.chainReadRange : UPGRADE_VALUES.chainReadRange; m.chainSlow = C ? CORRUPTED_VALUES.chainReadSlow : UPGRADE_VALUES.chainReadSlow; break;
+        case 'execution-protocol': m.executionProtocol = true; m.executionMult = C ? CORRUPTED_VALUES.executionBladeMult : UPGRADE_VALUES.executionBladeMult; break;
+        case 'cascade-break': m.cascadeBreak = true; m.cascadeShare = C ? CORRUPTED_VALUES.cascadeBreakShare : UPGRADE_VALUES.cascadeBreakShare; break;
+        case 'reactor-bleed': m.reactorBleed = true; m.bleedEnergy = C ? CORRUPTED_VALUES.reactorBleedEnergy : UPGRADE_VALUES.reactorBleedEnergy; m.bleedLife = C ? CORRUPTED_VALUES.reactorBleedLife : UPGRADE_VALUES.reactorBleedLife; break;
       }
     }
     for (const e of run.evolutions) {
@@ -191,8 +230,20 @@ export class Player implements PressureTarget {
       if (e === 'orbiting-interceptors') m.orbitingInterceptors = true;
       if (e === 'seismic-driver') m.seismicDriver = true;
     }
+    // ---- corrupted downsides: exactly one per corrupted card taken ----
+    this.ctx.director.flankDebt = false;
+    for (const c of run.corrupted) {
+      switch (c.downside) {
+        case 'en-ceiling': m.energyMax = Math.min(m.energyMax, DOWNSIDE_VALUES.energyCeiling); break;
+        case 'structure': m.structure = Math.round(m.structure * DOWNSIDE_VALUES.structureScale); break;
+        case 'vanish-window': m.vanishWindow *= DOWNSIDE_VALUES.vanishWindowScale; break;
+        case 'hardpoint-lockout': m.lockedHardpoint = c.lockedHardpoint ?? 'pile'; break;
+        case 'flank-debt': this.ctx.director.flankDebt = true; break;
+      }
+    }
+
     this.mods = m;
-    this.lock.capacity = m.splitLock ? UPGRADE_VALUES.splitLockCount : 1;
+    this.lock.capacity = m.splitLock ? m.lockCapacity : 1;
     this.vitals.noDecay = m.impactNeverDecays;
     this.ctx.ordnance.setInterceptors(m.orbitingInterceptors ? EVOLUTION_VALUES.interceptorCount : 0, PLAYER_GLOW);
   }
@@ -202,7 +253,7 @@ export class Player implements PressureTarget {
     this.vitals.reset(this.mods.structure);
     this.vitals.structure = Math.min(this.mods.structure, s);
     this.vitals.noDecay = this.mods.impactNeverDecays;
-    this.energy = T.energyMax;
+    this.energy = this.mods.energyMax;
     this.vel.set(0, 0, 0);
     this.assault = false;
     this.quickT = 0; this.quickCD = 0; this.invuln = 1.2;
@@ -218,7 +269,7 @@ export class Player implements PressureTarget {
     this.driver = new RigDriver(this.rig);
   }
 
-  healToFull() { this.vitals.reset(this.mods.structure); this.energy = T.energyMax; }
+  healToFull() { this.vitals.reset(this.mods.structure); this.energy = this.mods.energyMax; }
 
   // ------------------------------------------------------------------ per-frame
   /**
@@ -249,7 +300,10 @@ export class Player implements PressureTarget {
 
     const V = this.vitals;
 
-    if (canAct && input.pressed('assault') && this.energy > 5 && !V.staggered) this.assault = !this.assault;
+    // ASSAULT BOOST is a toggle by default; the hold-to-toggle assist converts it for players
+    // who cannot comfortably hold a modifier for a whole encounter.
+    if (settings.assists.holdAssaultBoost) this.assault = canAct && input.held('assault') && this.energy > 1 && !V.staggered;
+    else if (canAct && input.pressed('assault') && this.energy > 5 && !V.staggered) this.assault = !this.assault;
     if (this.energy < 1 || V.staggered) this.assault = false;
     if (canAct && input.pressed('vanish')) this.tryVanish(wish);
 
@@ -302,8 +356,8 @@ export class Player implements PressureTarget {
     // ---- energy ----
     if (consuming) this.regenT = T.regenDelay;
     if (!consuming && this.regenT <= 0) this.energy += dt * (this.grounded ? this.mods.regenGround : this.mods.regenAir);
-    if (T.infiniteEnergy) this.energy = T.energyMax;
-    this.energy = clamp(this.energy, 0, T.energyMax);
+    if (T.infiniteEnergy) this.energy = this.mods.energyMax;
+    this.energy = clamp(this.energy, 0, this.mods.energyMax);
 
     // ---- integrate ----
     this.pos.addScaledVector(this.vel, dt);
@@ -324,9 +378,9 @@ export class Player implements PressureTarget {
       for (const h of this.ctx.hostiles) {
         if (!h.alive) continue;
         if (h.pos.distanceTo(this.pos) < UPGRADE_VALUES.slipstreamRadius + 6) {
-          if (this.slipstreamT <= 0 || this.slipstreamStacks < UPGRADE_VALUES.slipstreamMaxStacks) {
-            this.slipstreamStacks = Math.min(UPGRADE_VALUES.slipstreamMaxStacks, this.slipstreamStacks + 1);
-            this.slipstreamT = UPGRADE_VALUES.slipstreamDuration;
+          if (this.slipstreamT <= 0 || this.slipstreamStacks < this.mods.slipstreamStacksMax) {
+            this.slipstreamStacks = Math.min(this.mods.slipstreamStacksMax, this.slipstreamStacks + 1);
+            this.slipstreamT = this.mods.slipstreamDur;
             this.ctx.fx.ring(this.pos, 3, 14, PLAYER_GLOW, 0.28);
           }
           break;
@@ -375,10 +429,10 @@ export class Player implements PressureTarget {
       if (h.windupRemaining < bestT) { bestT = h.windupRemaining; best = h; }
     }
     const perfect = !!best && bestT <= this.mods.vanishWindow;
-    const cost = perfect ? (this.mods.vanishRefunds ? -UPGRADE_VALUES.vanishBatteryGain : this.mods.vanishCost) : T.quickCost;
+    const cost = perfect ? (this.mods.vanishRefunds ? -this.mods.vanishRefundAmount : this.mods.vanishCost) : T.quickCost;
     if (this.energy < Math.max(0, cost)) { this.ctx.audio.empty(); return false; }
 
-    this.energy = clamp(this.energy - cost, 0, T.energyMax);
+    this.energy = clamp(this.energy - cost, 0, this.mods.energyMax);
     this.regenT = 0.6;
     this.quickCD = perfect ? T.vanishCooldown : T.quickCooldown;
     this.ctx.fx.ghost(this.rig.root, PLAYER_GLOW);
@@ -429,7 +483,10 @@ export class Player implements PressureTarget {
     const V = this.vitals;
     if (V.staggered) { this.railgunCharging = false; this.railgunCharge = 0; return; }
 
-    if (input.pressed('lock')) {
+    if (settings.assists.holdHardLock) {
+      if (input.pressed('lock')) { this.lock.acquire(this.ctx.hostiles, this.pos, this.forward()); this.lock.hard = this.lock.targets.length > 0; if (this.lock.hard) this.ctx.audio.lockOn(); }
+      else if (input.released('lock') && this.lock.hard) { this.lock.hard = false; this.lock.targets = []; this.ctx.audio.lockOff(); }
+    } else if (input.pressed('lock')) {
       const on = this.lock.toggleHard(this.ctx.hostiles, this.pos, this.forward());
       if (on) this.ctx.audio.lockOn(); else this.ctx.audio.lockOff();
     }
@@ -440,14 +497,17 @@ export class Player implements PressureTarget {
     if (!this.lock.hard) this.lock.acquire(this.ctx.hostiles, this.pos, this.forward());
 
     // ---- primary ----
-    if (this.mods.momentumRailgun) this.railgun(dt, input);
-    else if (input.held('rifle') && this.fireCD <= 0) { this.fireCD = T.rifleRate; this.fireRifle(); }
+    const locked = this.mods.lockedHardpoint;
+    if (locked !== 'rifle') {
+      if (this.mods.momentumRailgun) this.railgun(dt, input);
+      else if (input.held('rifle') && this.fireCD <= 0) { this.fireCD = T.rifleRate; this.fireRifle(); }
+    }
 
     // ---- melee ----
-    if (input.pressed('blade') && this.bladeCD <= 0) this.blade();
+    if (locked !== 'blade' && input.pressed('blade') && this.bladeCD <= 0) this.blade();
 
     // ---- shoulder A ----
-    if (!this.mods.orbitingInterceptors && input.pressed('missiles') && this.rackCD <= 0) {
+    if (locked !== 'missiles' && !this.mods.orbitingInterceptors && input.pressed('missiles') && this.rackCD <= 0) {
       this.rackCD = T.missileRackCooldown;
       this.missileQueue = T.missileCount;
       this.missileT = 0;
@@ -459,7 +519,7 @@ export class Player implements PressureTarget {
     }
 
     // ---- shoulder B ----
-    if (input.pressed('pile') && this.pileCD <= 0 && this.altitude > T.pileMinAltitude && !this.piling) {
+    if (locked !== 'pile' && input.pressed('pile') && this.pileCD <= 0 && this.altitude > T.pileMinAltitude && !this.piling) {
       this.piling = true;
       this.pileCD = this.mods.pileCooldown;
       this.ctx.audio.assaultBoostOn();
@@ -471,12 +531,12 @@ export class Player implements PressureTarget {
   private damageScale(): number {
     if (!this.mods.railCore) return 1;
     const k = clamp01((this.speed - UPGRADE_VALUES.railCoreMinSpeed) / (UPGRADE_VALUES.railCoreMaxSpeed - UPGRADE_VALUES.railCoreMinSpeed));
-    return 1 + k * UPGRADE_VALUES.railCoreMaxBonus;
+    return 1 + k * this.mods.railCoreBonus;
   }
 
   /** Weight of Attention: the locked target takes +35% damage. */
   private targetScale(h: Hostile): number {
-    return this.mods.weightOfAttention && this.lock.all.includes(h) ? 1 + UPGRADE_VALUES.weightLockedDamage : 1;
+    return this.mods.weightOfAttention && this.lock.all.includes(h) ? 1 + this.mods.weightLocked : 1;
   }
 
   dealDamage(h: Hostile, damage: number, impact: number, source: DamageSource) {
@@ -496,9 +556,9 @@ export class Player implements PressureTarget {
     this.events.onHostileKilled(h, source);
     // CHAIN READ: killing a locked hostile locks the nearest within 220m and grants 1.0s bullet time.
     if (this.mods.chainRead && wasLocked) {
-      const next = this.lock.chainTo(this.ctx.hostiles.filter((x) => x !== h), this.pos, UPGRADE_VALUES.chainReadRange);
+      const next = this.lock.chainTo(this.ctx.hostiles.filter((x) => x !== h), this.pos, this.mods.chainRange);
       if (next) {
-        this.events.enterSlow(0.28, UPGRADE_VALUES.chainReadSlow);
+        this.events.enterSlow(0.28, this.mods.chainSlow);
         this.events.onFlash('CHAIN READ', '#8ff4ff');
         this.ctx.audio.lockOn();
       }
@@ -595,7 +655,7 @@ export class Player implements PressureTarget {
   private bladeStrike(h: Hostile, damage: number, impact: number) {
     let dmg = damage;
     if (this.mods.executionProtocol && h.vitals.staggered) {
-      dmg *= UPGRADE_VALUES.executionBladeMult;
+      dmg *= this.mods.executionMult;
       this.bladeCD = 0;
       this.events.onFlash('EXECUTION', '#ffd24a');
     }
@@ -639,7 +699,7 @@ export class Player implements PressureTarget {
   onAnyHostileStagger(h: Hostile) {
     // CASCADE BREAK: 40% of that target's Impact Max to every other hostile.
     if (this.mods.cascadeBreak) {
-      const share = h.vitals.impactMax * UPGRADE_VALUES.cascadeBreakShare;
+      const share = h.vitals.impactMax * this.mods.cascadeShare;
       for (const o of this.ctx.hostiles) {
         if (o === h || !o.alive) continue;
         const r = o.vitals.addImpact(share, this.ctx.time);
@@ -649,10 +709,10 @@ export class Player implements PressureTarget {
       this.events.onFlash('CASCADE BREAK', '#8ff4ff');
     }
     // REACTOR BLEED: drop a 40 EN core for 8.0s.
-    if (this.mods.reactorBleed) this.ctx.ordnance.spawnCore(h.pos.clone());
+    if (this.mods.reactorBleed) this.ctx.ordnance.spawnCore(h.pos.clone(), this.mods.bleedEnergy, this.mods.bleedLife);
   }
 
-  addEnergy(amount: number) { this.energy = clamp(this.energy + amount, 0, T.energyMax); }
+  addEnergy(amount: number) { this.energy = clamp(this.energy + amount, 0, this.mods.energyMax); }
 
   // ------------------------------------------------------------------ presentation
   private present(dt: number) {

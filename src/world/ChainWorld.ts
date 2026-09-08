@@ -58,6 +58,8 @@ export interface Hazard {
   impact: number;
   group: THREE.Group;
   armed: boolean;
+  /** Seconds until this hazard may hit again. Without it a sweeper drains a full bar in four seconds. */
+  cd: number;
 }
 
 const ARENA_RADIUS = 330;
@@ -66,7 +68,14 @@ const SHAFT_RADIUS = 250;
 const LINK_HALF = 140;
 const COVER_MAX_HEIGHT = 17;   // silhouette contract: nothing occludes the horizon in a fight
 
-export class ChainWorld {
+/**
+ * ONE SECTOR of the descent.
+ *
+ * A sector owns its own scene graph, volumes, gates and hazards, and knows the z/y it starts
+ * at. Sectors are laid end to end, so the player's z is global and a sector simply answers for
+ * the span it covers. Nothing here knows about any other sector — the manager below does.
+ */
+export class Sector {
   root = new THREE.Group();
   volumes: Volume[] = [];
   gates: Gate[] = [];
@@ -75,47 +84,64 @@ export class ChainWorld {
   nodes: Volume[] = [];
   forges: Volume[] = [];
   boss: Volume | null = null;
+  /** True once the incremental builder has finished. */
+  ready = false;
   private mats: KitMaterials;
-  /** How many times geometry has been generated. A sector must only ever need one. */
-  buildCount = 0;
   private rng!: Rng;
+  private index = 0;
+  private cursorZ = 0;
+  private cursorY = 0;
 
-  constructor(scene: THREE.Scene) {
+  constructor(private scene: THREE.Scene, public sectorIndex: number, public zOrigin: number, public yOrigin: number) {
     this.mats = kitMaterials();
+    this.cursorZ = zOrigin;
+    this.cursorY = yOrigin;
     scene.add(this.root);
   }
 
+  get z0() { return this.zOrigin; }
+  get z1() { return this.volumes.length ? this.volumes[this.volumes.length - 1].z1 : this.zOrigin; }
+  get yEnd() { return this.volumes.length ? this.volumes[this.volumes.length - 1].y1 : this.yOrigin; }
+  contains(z: number) { return z >= this.z0 && z < this.z1; }
+
+  /**
+   * Retire the sector: every geometry and every material this sector created is released.
+   * Shared kit materials are module-cached and deliberately survive — they are the same six
+   * materials every sector draws with.
+   */
   dispose() {
+    const shared = new Set<THREE.Material>(Object.values(this.mats));
     this.root.traverse((o) => {
       const m = o as THREE.Mesh;
       if (!m.isMesh) return;
       m.geometry?.dispose();
       const mat = m.material as THREE.Material | THREE.Material[];
-      if (Array.isArray(mat)) mat.forEach((x) => { if (!Object.values(this.mats).includes(x as THREE.MeshStandardMaterial)) x.dispose(); });
-      else if (mat && !Object.values(this.mats).includes(mat as THREE.MeshStandardMaterial)) mat.dispose();
+      if (Array.isArray(mat)) mat.forEach((x) => { if (!shared.has(x)) x.dispose(); });
+      else if (mat && !shared.has(mat)) mat.dispose();
     });
     this.root.clear();
+    this.scene.remove(this.root);
     this.volumes = []; this.gates = []; this.hazards = []; this.nodes = []; this.forges = []; this.boss = null;
+    this.ready = false;
   }
 
   /**
-   * Build the whole sector in one pass: CHAIN A -> FORGE -> CHAIN B -> FORGE -> SEVERANCE,
-   * laid end to end along +Z and descending in Y.
+   * Incremental builder. Yields after each volume so the manager can spend a few milliseconds
+   * per frame building the NEXT sector while the current one is being played — the whole point
+   * of the lifecycle change, since four sectors resident at once is a memory monument.
    *
-   * Everything exists before the run starts, so no transition anywhere in the sector has
-   * anything left to load. The streamer only toggles visibility.
+   * Slicing does not affect determinism: this is the only consumer of RNG.stream('layout'),
+   * and it draws in the same order however the work is spread across frames.
    */
-  build(chains: ChainSpec[], sector = 1) {
-    this.dispose();
-    this.buildCount++;
+  *buildSteps(chains: ChainSpec[], opts: { trailingLink: boolean }): Generator<number, void, void> {
     this.rng = RNG.stream('layout');
-    let z = 0;
-    let y = 0;
-    let index = 0;
+    this.index = 0;
+    this.cursorZ = this.zOrigin;
+    this.cursorY = this.yOrigin;
 
     const link = (tissue: TissueId) => {
-      const v = this.pushVolume(index++, 'link', null, tissue, z, y, -1);
-      z = v.z1; y = v.y1;
+      const v = this.pushVolume(this.index++, 'link', null, tissue, this.cursorZ, this.cursorY, -1);
+      this.cursorZ = v.z1; this.cursorY = v.y1;
       return v;
     };
 
@@ -124,27 +150,42 @@ export class ChainWorld {
       for (let i = 0; i < chain.sequence.length; i++) {
         const state = chain.sequence[i];
         const spec = ENCOUNTERS[state];
-        const vol = this.pushVolume(index++, spec.volume === 'arena' ? 'arena' : spec.volume === 'corridor' ? 'corridor' : 'shaft', state, null, z, y, this.nodes.length);
+        const vol = this.pushVolume(this.index++, spec.volume === 'arena' ? 'arena' : spec.volume === 'corridor' ? 'corridor' : 'shaft', state, null, this.cursorZ, this.cursorY, this.nodes.length);
         vol.chain = ci;
         this.nodes.push(vol);
-        z = vol.z1; y = vol.y1;
-        if (i < chain.sequence.length - 1) link(chain.tissue[i] ?? 'CONDUIT');
+        this.cursorZ = vol.z1; this.cursorY = vol.y1;
+        yield 1;
+        if (i < chain.sequence.length - 1) { link(chain.tissue[i] ?? 'CONDUIT'); yield 1; }
       }
       // every chain ends at a decision point
       link(ci === chains.length - 1 ? 'OPEN FALL' : 'CONDUIT');
-      const forge = this.pushVolume(index++, 'forge', null, null, z, y, -1);
+      yield 1;
+      const forge = this.pushVolume(this.index++, 'forge', null, null, this.cursorZ, this.cursorY, -1);
       forge.chain = ci;
       this.forges.push(forge);
-      z = forge.z1; y = forge.y1;
+      this.cursorZ = forge.z1; this.cursorY = forge.y1;
+      yield 1;
       link('OPEN FALL');
+      yield 1;
     }
 
-    const boss = this.pushVolume(index++, 'boss', null, null, z, y, -1);
+    const boss = this.pushVolume(this.index++, 'boss', null, null, this.cursorZ, this.cursorY, -1);
     this.boss = boss;
+    this.cursorZ = boss.z1; this.cursorY = boss.y1;
+    yield 1;
+
+    // a sector that is not the last one exits into connective tissue, so the boundary is a
+    // playable connective rather than a cut
+    if (opts.trailingLink) { this.addGate(boss); link('OPEN FALL'); yield 1; }
 
     for (const n of this.nodes) this.addGate(n);
     for (const f of this.forges) this.addGate(f);
-    void sector;
+    this.ready = true;
+  }
+
+  /** Build to completion immediately. Used for the first sector, which must exist now. */
+  buildNow(chains: ChainSpec[], opts: { trailingLink: boolean }) {
+    for (const _ of this.buildSteps(chains, opts)) void _;
   }
 
   // ------------------------------------------------------------------ construction
@@ -367,7 +408,7 @@ export class ChainWorld {
         group.add(vent, ring);
       }
       v.group.add(group);
-      this.hazards.push({ kind, pos: group.position.clone(), phase: rng.range(0, Math.PI * 2), period: kind === 'sweeper' ? rng.range(3.0, 4.6) : rng.range(2.2, 3.2), radius, damage: 240, impact: 120, group, armed: true });
+      this.hazards.push({ kind, pos: group.position.clone(), phase: rng.range(0, Math.PI * 2), period: kind === 'sweeper' ? rng.range(3.0, 4.6) : rng.range(2.2, 3.2), radius, damage: 240, impact: 120, group, armed: true, cd: 0 });
     }
   }
 
@@ -465,6 +506,7 @@ export class ChainWorld {
 
     // hazards
     for (const h of this.hazards) {
+      h.cd = Math.max(0, h.cd - dt);
       const phase = (time / h.period + h.phase) % 1;
       if (h.kind === 'sweeper') {
         const arm = h.group.getObjectByName('arm');
@@ -476,7 +518,7 @@ export class ChainWorld {
           const ang = Math.atan2(d.x, d.z);
           let diff = Math.abs(((ang - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
           diff = Math.min(diff, Math.abs(diff - Math.PI));
-          if (diff < 0.16) target.receiveHit(h.damage, h.impact, null, 'sweeper');
+          if (diff < 0.16 && h.cd <= 0) { target.receiveHit(h.damage, h.impact, null, 'sweeper'); h.cd = 1.1; }
         }
       } else {
         const ring = h.group.getObjectByName('ring') as THREE.Mesh | undefined;
@@ -508,8 +550,174 @@ export class ChainWorld {
     return { visible, total: this.volumes.length };
   }
 
-  get length() { return this.volumes.length ? this.volumes[this.volumes.length - 1].z1 : 0; }
-  get sectorLook() { return SECTOR_LOOKS[1]; }
+  get length() { return this.z1 - this.z0; }
+  get sectorLook() { return SECTOR_LOOKS[Math.min(4, this.sectorIndex)] ?? SECTOR_LOOKS[1]; }
 }
 
 export { clamp };
+
+/**
+ * ============================================================================================
+ * SECTOR LIFECYCLE  (v0.2 §3.4)
+ *
+ * The Alpha generated one ~12km sector in a single pass. Four of those concatenated is a 48km
+ * memory monument, so the architecture is fixed before it becomes four sectors of debt:
+ *
+ *   - the UPCOMING sector is built incrementally while the current one is being played,
+ *     a few milliseconds per frame, so it costs no hitch;
+ *   - the PREVIOUS sector's geometry, materials and colliders are retired once the player is
+ *     safely inside the new one;
+ *   - NEVER more than two sectors are resident.
+ *
+ * Everything that must survive a boundary — RunState, the Director's pilot model, build,
+ * weapon evolutions, score metrics, RNG stream cursors — lives outside this class and is
+ * simply never touched here. The boundary is a playable connective, not a cut.
+ * ============================================================================================
+ */
+export class SectorWorld {
+  private sectors: Sector[] = [];
+  private pending: { sector: Sector; steps: Generator<number, void, void> } | null = null;
+  /** How many sectors have been generated this session — the lifecycle's headline counter. */
+  buildCount = 0;
+  retiredCount = 0;
+  /** Milliseconds per frame the incremental builder may spend. */
+  budgetMs = 3.5;
+
+  constructor(private scene: THREE.Scene) {}
+
+  get current(): Sector | null { return this.sectors[this.sectors.length - 1] ?? null; }
+  get oldest(): Sector | null { return this.sectors[0] ?? null; }
+  get residentCount() { return this.sectors.length; }
+  get volumeCount() { return this.sectors.reduce((n, s) => n + s.volumes.length, 0); }
+  get volumes(): Volume[] { return this.sectors.flatMap((s) => s.volumes); }
+  get sectorsResident() { return this.sectors.map((s) => s.sectorIndex); }
+  /** The sector the player is being asked to play right now. */
+  get active(): Sector | null { return this.sectors[this.sectors.length - 1] ?? null; }
+
+  /** Tear everything down — a new run starts from nothing resident. */
+  reset() {
+    for (const s of this.sectors) s.dispose();
+    this.sectors = [];
+    this.pending = null;
+    this.buildCount = 0;
+    this.retiredCount = 0;
+  }
+
+  /** Build the first sector synchronously: the player is about to stand in it. */
+  beginSector(chains: ChainSpec[], sectorIndex: number, trailingLink: boolean): Sector {
+    const prev = this.current;
+    const zOrigin = prev ? prev.z1 : 0;
+    const yOrigin = prev ? prev.yEnd : 0;
+    const s = new Sector(this.scene, sectorIndex, zOrigin, yOrigin);
+    s.buildNow(chains, { trailingLink });
+    this.sectors.push(s);
+    this.buildCount++;
+    this.enforceResidency();
+    return s;
+  }
+
+  /**
+   * Start building the next sector in the background. Safe to call repeatedly; only the first
+   * call for a given sector index does anything.
+   */
+  queueSector(chains: ChainSpec[], sectorIndex: number, trailingLink: boolean): boolean {
+    if (this.pending) return false;
+    if (this.sectors.some((s) => s.sectorIndex === sectorIndex)) return false;
+    const prev = this.current;
+    const s = new Sector(this.scene, sectorIndex, prev ? prev.z1 : 0, prev ? prev.yEnd : 0);
+    this.pending = { sector: s, steps: s.buildSteps(chains, { trailingLink }) };
+    return true;
+  }
+
+  /** Spend the frame budget on the queued sector. Called once per frame from the game loop. */
+  pump(): void {
+    if (!this.pending) return;
+    const t0 = performance.now();
+    while (performance.now() - t0 < this.budgetMs) {
+      const r = this.pending.steps.next();
+      if (r.done) {
+        this.sectors.push(this.pending.sector);
+        this.buildCount++;
+        this.pending = null;
+        this.enforceResidency();
+        return;
+      }
+    }
+  }
+
+  get building() { return !!this.pending; }
+  get pendingIndex() { return this.pending?.sector.sectorIndex ?? null; }
+
+  /**
+   * Retire sectors the player has left. Called with the player's z: a sector is only released
+   * once the player is comfortably inside a later one, so nothing is ever disposed out from
+   * under a collider query.
+   */
+  retirePassed(playerZ: number, margin = 200) {
+    while (this.sectors.length > 1) {
+      const oldest = this.sectors[0];
+      if (playerZ < oldest.z1 + margin) break;
+      oldest.dispose();
+      this.sectors.shift();
+      this.retiredCount++;
+    }
+  }
+
+  /** Hard cap: never more than two resident, whatever the caller does. */
+  private enforceResidency() {
+    while (this.sectors.length > 2) {
+      const oldest = this.sectors.shift()!;
+      oldest.dispose();
+      this.retiredCount++;
+    }
+  }
+
+  // ------------------------------------------------------------------ routed queries
+  private sectorAt(z: number): Sector | null {
+    for (const s of this.sectors) if (s.contains(z)) return s;
+    if (!this.sectors.length) return null;
+    return z < this.sectors[0].z0 ? this.sectors[0] : this.sectors[this.sectors.length - 1];
+  }
+
+  groundAt(x: number, z: number): number {
+    const s = this.sectorAt(z);
+    return s ? s.groundAt(x, z) : 0;
+  }
+
+  confine(pos: THREE.Vector3, margin = 0): boolean {
+    const s = this.sectorAt(pos.z);
+    if (!s) return false;
+    let clamped = s.confine(pos, margin);
+    // the resident span is the world: never let the player walk off the end of what exists
+    const first = this.sectors[0], last = this.sectors[this.sectors.length - 1];
+    if (pos.z < first.z0 + 6) { pos.z = first.z0 + 6; clamped = true; }
+    if (pos.z > last.z1 - 6) { pos.z = last.z1 - 6; clamped = true; }
+    return clamped;
+  }
+
+  volumeCentre(v: Volume) { return (this.sectorAt((v.z0 + v.z1) / 2) ?? this.sectors[0]).volumeCentre(v); }
+  entryPoint(v: Volume) { return (this.sectorAt((v.z0 + v.z1) / 2) ?? this.sectors[0]).entryPoint(v); }
+  openGate(v: Volume) { for (const s of this.sectors) s.openGate(v); }
+  closeGate(v: Volume) { for (const s of this.sectors) s.closeGate(v); }
+
+  update(dt: number, time: number, target: { pos: THREE.Vector3; receiveHit: (d: number, i: number, from: null, attack: string) => void }) {
+    for (const s of this.sectors) s.update(dt, time, target);
+  }
+
+  stream(playerZ: number, range = 2600): { visible: number; total: number } {
+    let visible = 0, total = 0;
+    for (const s of this.sectors) { const r = s.stream(playerZ, range); visible += r.visible; total += r.total; }
+    return { visible, total };
+  }
+
+  /** Telemetry for the lifecycle proof. */
+  snapshot() {
+    return {
+      resident: this.sectors.length,
+      sectors: this.sectors.map((s) => ({ index: s.sectorIndex, z0: Math.round(s.z0), z1: Math.round(s.z1), volumes: s.volumes.length })),
+      building: this.pendingIndex,
+      built: this.buildCount,
+      retired: this.retiredCount,
+    };
+  }
+}

@@ -12,7 +12,14 @@ export const pad = (n: number, w = 3) => String(Math.round(n)).padStart(w, '0');
  * Grid focus model shared by every screen, so a controller can drive the entire game — title,
  * reactor select, FORGE, results and pause — without a mouse ever being touched.
  */
-export interface NavItem { el: HTMLElement; activate: () => void; col?: number; row?: number }
+export interface NavItem {
+  el: HTMLElement;
+  activate: () => void;
+  col?: number;
+  row?: number;
+  /** Sliders and steppers consume left/right to change their value instead of moving focus. */
+  adjust?: (dir: -1 | 1) => void;
+}
 
 export class Nav {
   items: NavItem[] = [];
@@ -64,6 +71,7 @@ export class Nav {
       }
       return;
     }
+    if (dx !== 0 && cur.adjust) { cur.adjust(dx > 0 ? 1 : -1); this.onMove?.(); return; }
     if (dx !== 0) {
       if (cur.row !== undefined) {
         const inRow = this.items.filter((i) => i.row === cur.row);

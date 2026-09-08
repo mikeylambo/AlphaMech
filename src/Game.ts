@@ -8,6 +8,7 @@ import { T } from './core/Tuning';
 import { RNG, freshSeed } from './core/RNG';
 import { clamp, clamp01, damp } from './core/MathUtil';
 import { InputManager, RallyDir } from './core/Input';
+import { settings } from './core/Settings';
 import { updateThrusterTime } from './fx/Thruster';
 import { Effects } from './fx/Effects';
 import { AudioManager } from './audio/Audio';
@@ -22,18 +23,25 @@ import { Hostile, DamageSource } from './frame/Types';
 import { Director } from './director/Director';
 import { ENCOUNTERS, EncounterId } from './director/Encounters';
 import { selectChains } from './director/Chains';
+import { VariantSpec, pickVariant, VARIANTS, VARIANTS_BY_STATE } from './director/Variants';
+import { EncounterFields } from './director/EncounterFields';
+import { Transports } from './director/Transports';
+import { Onboarding } from './director/Onboarding';
 
 import { Enemy, resetHostileIds } from './enemies/Enemy';
 import { prewarmRigs } from './entities/RigCache';
 import { ARCHETYPES, ARCHETYPE_PALETTES, ArchetypeId } from './enemies/Archetypes';
 import { Severance } from './enemies/Severance';
+import { Gravemark } from './enemies/Gravemark';
 
-import { ChainWorld, Volume } from './world/ChainWorld';
+import { SectorWorld, Volume } from './world/ChainWorld';
 import { buildLighting, SECTOR_LOOKS, SectorLighting } from './world/Sector';
 
 import { RunState } from './build/RunState';
 import { ReactorId, REACTORS } from './build/Reactors';
 import { UpgradeId } from './build/Upgrades';
+import { FALL_TIERS, fallProgress, tierFor, fallLadderProof } from './director/Fall';
+import { pickElite, ELITES } from './enemies/Elites';
 import { EvolutionId, HardpointId } from './build/Weapons';
 
 import { MetricsSampler, EncounterScore, aggregate } from './score/Metrics';
@@ -43,10 +51,13 @@ import { HUD } from './ui/HUD';
 import { Screens } from './ui/Screens';
 import { DebugPanel, Profiler } from './ui/Debug';
 
-type Mode = 'title' | 'run' | 'forge' | 'results' | 'pause' | 'dead';
+type Mode = 'title' | 'run' | 'forge' | 'results' | 'pause' | 'dead' | 'tutorial';
 
 interface Stop {
   kind: 'node' | 'forge' | 'boss';
+  sector: number;
+  /** Drawn once, on first entry, and remembered so a re-entry does not reroll it. */
+  variant?: VariantSpec;
   volume: Volume;
   state: EncounterId | null;
   started: boolean;
@@ -71,7 +82,7 @@ export class Game {
   audio = new AudioManager();
   fx: Effects;
   ordnance: Ordnance;
-  world: ChainWorld;
+  world: SectorWorld;
   director = new Director();
   rig = new CameraRig(new THREE.PerspectiveCamera());
   hud: HUD;
@@ -82,10 +93,21 @@ export class Game {
   // --- simulation ---
   player!: Player;
   hostiles: Enemy[] = [];
-  boss: Severance | null = null;
+  boss: Severance | Gravemark | null = null;
+  /** Which of Sector 1's two bosses this seed drew. */
+  private bossKind: 'severance' | 'gravemark' = 'severance';
   run = new RunState();
   rally = new Rally();
   metrics = new MetricsSampler();
+  fields!: EncounterFields;
+  transports!: Transports;
+  /** The configuration the current encounter is running. */
+  variant: VariantSpec | null = null;
+  private objectiveT = 0;
+  onboarding!: Onboarding;
+  /** Hostiles the tutorial is driving behind the player. */
+  /** Tutorial-only: hostile id -> bearing off the player's nose it is being held on. */
+  private driven = new Map<number, number>();
   ctx!: CombatContext;
 
   mode: Mode = 'title';
@@ -106,13 +128,22 @@ export class Game {
   private pendingSeed = freshSeed();
   private transitTimer = 0;
   private lastStagger = new Map<number, number>();
+  /** Highest sector index already queued for background construction. */
+  private queuedSector = 0;
   private setupProof: Record<string, unknown> = {};
+  private nextChains: import('./director/Chains').ChainSpec[] = [];
+  private nextLaw2: RunState['law2'] | null = null;
   private lastFrameMs = 16.7;
   private frameAvg = 16.7;
   private pixelRatio = 1;
   private resScaleT = 0;
   private lastDrawCalls = 0;
   private lastTriangles = 0;
+  /** Rolling window of raw frame times, for the profiling instrument (tools/profile.mjs). */
+  private frameLog: number[] = [];
+  private frameLogCap = 4096;
+  /** Set once from WEBGL_debug_renderer_info so a profile run records which GPU produced it. */
+  adapter = 'unknown';
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -127,6 +158,12 @@ export class Game {
     // the composer renders several passes per frame; accumulate their stats instead of
     // reporting only the last fullscreen quad
     this.renderer.info.autoReset = false;
+    // record the adapter so a profile table can never be mistaken for the wrong hardware
+    try {
+      const gl = this.renderer.getContext();
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      if (ext) this.adapter = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL));
+    } catch { /* extension unavailable: leave 'unknown' */ }
 
     this.camera = new THREE.PerspectiveCamera(T.camFov, innerWidth / innerHeight, 0.6, 12000);
     this.rig = new CameraRig(this.camera);
@@ -145,14 +182,24 @@ export class Game {
 
     this.input = new InputManager(canvas);
     this.fx = new Effects(this.scene);
-    this.world = new ChainWorld(this.scene);
+    this.fields = new EncounterFields(this.scene, this.fx);
+    this.fx.vfx.quality = settings.assists.fxIntensity;
+    this.world = new SectorWorld(this.scene);
     this.hud = new HUD(ui);
     this.screens = new Screens(ui, this.audio);
+    this.screens.attachInput(this.input);
+    // settings apply live: FOV, sensitivity, telegraph contrast and the vanish-window baseline
+    // all reach the simulation without a restart
+    this.screens.onSettingsChanged = () => {
+      this.fx.vfx.quality = settings.assists.fxIntensity;
+      this.player.applyBuild(this.run);
+    };
     this.debug = new DebugPanel(ui);
     // a live edit to a constant must reach derived state immediately, not at the next FORGE
     this.debug.onChange = () => { this.player.applyBuild(this.run); this.hud.buildHardpoints(this.run); };
     this.profiler = new Profiler(ui);
 
+    this.transports = new Transports(this.scene, this.fx);
     this.ordnance = new Ordnance(this.scene, this.fx, {
       onPlayerHit: (d, i, from, attack) => this.player.receiveHit(d, i, from, attack),
       onHostileHit: (hst, d, i, src) => this.player.dealDamage(hst, d, i, src as DamageSource),
@@ -166,7 +213,19 @@ export class Game {
       scene: this.scene, fx: this.fx, audio: this.audio, director: this.director, ordnance: this.ordnance,
       target: null as unknown as Player, hostiles: this.hostiles as Hostile[], time: 0, telegraphLead: 0,
       groundAt: (x, z) => this.world.groundAt(x, z),
-      confine: (pos, margin) => this.world.confine(pos, margin ?? 0),
+      confine: (pos, margin) => {
+        let clamped = this.world.confine(pos, margin ?? 0);
+        // CONTESTED GROUND and friends narrow the usable volume over the encounter
+        const r = this.fields.confineRadius;
+        if (r !== Infinity) {
+          const c = this.fields.centre;
+          const dx = pos.x - c.x, dz = pos.z - c.z;
+          const d = Math.hypot(dx, dz);
+          const lim = Math.max(20, r - (margin ?? 0));
+          if (d > lim && d > 0.001) { pos.x = c.x + (dx / d) * lim; pos.z = c.z + (dz / d) * lim; clamped = true; }
+        }
+        return clamped;
+      },
       shake: (a) => this.rig.addShake(a),
       onHostileStagger: (hst, by) => this.onHostileStagger(hst, by),
       onHostileDeath: (hst) => this.onHostileDeath(hst),
@@ -191,6 +250,17 @@ export class Game {
     prewarmRigs({
       standard: ARCHETYPE_PALETTES.sentry, sniper: ARCHETYPE_PALETTES.lancer, brawler: ARCHETYPE_PALETTES.brawler,
       heavy: ARCHETYPE_PALETTES.warden, drone: ARCHETYPE_PALETTES.harrier, ace: ARCHETYPE_PALETTES.lancer,
+    });
+
+    this.onboarding = new Onboarding({
+      spawn: (kind, bearing, distance) => this.tutorialSpawn(kind, bearing, distance),
+      prompt: (beat) => this.hud.setTutorial(beat),
+      flash: (t, c) => this.hud.flash(t, c),
+      drive: (e, bearing) => { if (bearing === null) this.driven.delete(e.id); else this.driven.set(e.id, bearing); },
+      forceWindup: (e) => { e.currentAttack = 'sweep'; e.state = 'windup'; e.windupMax = 0.9; e.windupRemaining = 0.9; this.metrics.vanishableAttacks++; },
+      openExit: () => { const n = this.stops[0]; if (n) { this.world.openGate(n.volume); this.hud.setEncounter('ORIENTATION', 'ARENA', 1, 1, 'GATE OPEN', 'ROTATION'); } },
+      exited: () => { const n = this.stops[0]; return !!n && this.player.pos.z > n.volume.z1 - 24; },
+      finish: () => this.finishOnboarding(),
     });
 
     this.rally.onResolve = (o, m, foe) => this.resolveRally(o, m, foe);
@@ -236,36 +306,39 @@ export class Game {
     this.hud.show(false);
     this.input.menuMode = true;
     this.input.releasePointer();
-    this.screens.showTitle(this.pendingSeed, (r) => this.startRun(this.pendingSeed, r), () => {
+    this.screens.showTitle(this.pendingSeed, (r, fall) => this.startRun(this.pendingSeed, r, fall), () => {
       this.pendingSeed = freshSeed();
       this.screens.setSeed(this.pendingSeed);
-    });
+    }, () => {
+      this.screens.setSettingsReturnHandler(() => this.showTitle());
+      this.screens.showSettings('title');
+    }, () => this.startOnboarding());
     // a slow orbit over an empty arena so the title screen is not a static image
-    if (!this.world.volumes.length) {
+    if (!this.world.volumeCount) {
       RNG.init(this.pendingSeed);
       const sel = selectChains(1, null);
-      this.world.build([sel.chains[0]], 1);
+      this.world.beginSector([sel.chains[0]], 1, false);
       this.player.pos.set(0, 0, 200);
     }
   }
 
-  startRun(seed: string, reactor: ReactorId) {
+  startRun(seed: string, reactor: ReactorId, fall = fallProgress.selected) {
     this.audio.start();
     this.audio.resume();
-    this.run.begin(seed, reactor);
+    this.run.begin(seed, reactor, fall);
+    this.director.setFall(tierFor(fall));
+    this.director.flankDebt = false;
+    // Two Sector 1 bosses; the seed draws one from the boss stream before anything else uses it.
+    this.bossKind = RNG.stream('boss').chance(0.5) ? 'gravemark' : 'severance';
 
-    // Whole sector, built once: CHAIN A -> FORGE -> CHAIN B -> FORGE -> SEVERANCE.
-    // Nothing is generated at a transition, which is what makes "no loading break" structural.
-    this.world.build(this.run.chains, this.run.sector);
-
+    // The current sector is built now; the NEXT one is built incrementally while this one is
+    // played, and the previous one is retired. Never more than two resident (§3.4).
+    this.world.reset();
+    const sector = this.world.beginSector(this.run.chains, this.run.sector, this.run.sectorPlan > 1);
     this.stops = [];
-    for (const v of this.world.volumes) {
-      if (v.node >= 0) this.stops.push({ kind: 'node', volume: v, state: v.state, started: false, cleared: false, label: v.state ?? 'ENCOUNTER' });
-      else if (v.kind === 'forge') this.stops.push({ kind: 'forge', volume: v, state: null, started: false, cleared: false, label: 'FORGE' });
-      else if (v.kind === 'boss') this.stops.push({ kind: 'boss', volume: v, state: null, started: false, cleared: false, label: 'SEVERANCE' });
-    }
-    this.stops.sort((a, b) => a.volume.z0 - b.volume.z0);
     this.stopIndex = 0;
+    this.appendStops(sector);
+    this.queuedSector = this.run.sector;
 
     this.clearHostiles();
     this.ordnance.clear();
@@ -302,6 +375,21 @@ export class Game {
     this.hud.toast(`SEED ${seed} · ${this.run.chains.map((c) => c.name).join('  →  ')}`);
   }
 
+  /** Turn a resident sector's volumes into the ordered list of stops the run plays through. */
+  private appendStops(sector: { volumes: Volume[]; sectorIndex: number }) {
+    const added: Stop[] = [];
+    for (const v of sector.volumes) {
+      if (v.node >= 0) added.push({ kind: 'node', volume: v, state: v.state, started: false, cleared: false, label: v.state ?? 'ENCOUNTER', sector: sector.sectorIndex });
+      else if (v.kind === 'forge') added.push({ kind: 'forge', volume: v, state: null, started: false, cleared: false, label: 'FORGE', sector: sector.sectorIndex });
+      else if (v.kind === 'boss') added.push({ kind: 'boss', volume: v, state: null, started: false, cleared: false, label: this.bossLabelFor(sector.sectorIndex), sector: sector.sectorIndex });
+    }
+    added.sort((a, b) => a.volume.z0 - b.volume.z0);
+    this.stops.push(...added);
+  }
+
+  /** The seed picks one of the sector's two bosses. Two exams, different skills. */
+  private bossLabelFor(_sectorIndex: number) { return this.bossKind === 'gravemark' ? 'GRAVEMARK' : 'SEVERANCE'; }
+
   /** Checkpoint C evidence: the procedural setup RETRY SEED must reproduce exactly. */
   private captureSetupProof() {
     this.setupProof = {
@@ -327,21 +415,41 @@ export class Game {
 
     if (stop.kind === 'node' && stop.state) {
       const spec = ENCOUNTERS[stop.state];
-      const combat = spec.hostiles[1] > 0;
-      this.metrics.begin(`${this.run.currentChain?.name ?? ''} · ${stop.state}`, this.player.vitals.structureMax, combat);
+      // The seed picks the configuration; the state, and therefore Chain Law 2, is untouched.
+      const variant = stop.variant ?? (stop.variant = pickVariant(stop.state));
+      this.variant = variant;
+      this.objectiveT = variant.duration ?? 0;
+      this.transports.clear();
+      const combat = variant.objective !== 'reach-exit' && (variant.count?.[1] ?? spec.hostiles[1]) > 0;
+      this.metrics.begin(`${this.run.currentChain?.name ?? ''} · ${stop.state} · ${variant.name}`, this.player.vitals.structureMax, combat);
       this.run.nodeIndex = stop.volume.node;
       const chain = this.run.chains[Math.max(0, stop.volume.chain)];
       this.run.chainIndex = Math.max(0, stop.volume.chain);
       const nodeInChain = chain.sequence.indexOf(stop.state);
-      this.hud.setEncounter(chain.name, stop.state, Math.max(0, nodeInChain), chain.sequence.length, spec.brief, `${spec.primaryStress} · ${spec.secondaryStress}`);
+      this.hud.setEncounter(chain.name, stop.state, Math.max(0, nodeInChain), chain.sequence.length, variant.brief, `${spec.primaryStress} · ${spec.secondaryStress} · ${variant.name}`);
+
+      // raise the variant's geometry field over this volume
+      const c = this.world.volumeCentre(stop.volume);
+      const r = stop.volume.radius > 0 ? stop.volume.radius : stop.volume.halfWidth;
+      this.fields.raise(variant, c, r, this.director.fall.geometryPressure, (x, z) => this.world.groundAt(x, z));
+
+      if (variant.objective === 'destroy-targets') {
+        const n = variant.targets ?? 3;
+        for (let i = 0; i < n; i++) {
+          const p = new THREE.Vector3(c.x + (i - (n - 1) / 2) * 34, 0, stop.volume.z0 + 260 + i * 90);
+          p.y = this.world.groundAt(p.x, p.z) + 24;
+          this.transports.spawn(p, stop.volume.z1 - 40);
+        }
+      }
+
       if (combat) {
         this.world.closeGate(stop.volume);
         this.spawnWave(stop, true);
         this.waveT = this.director.pressure.reinforcementTiming;
       } else {
         this.world.openGate(stop.volume);
-        this.hud.setObjective(spec.brief, 'NO COMBAT · ENVIRONMENTAL DAMAGE');
       }
+      this.hud.setObjective(variant.brief, variant.asks.toUpperCase());
       this.audio.checkpoint();
     } else if (stop.kind === 'forge') {
       this.enterForge(stop);
@@ -353,15 +461,22 @@ export class Game {
   private spawnWave(stop: Stop, initial: boolean) {
     if (!stop.state) return;
     const spec = ENCOUNTERS[stop.state];
+    const variant = stop.variant;
+    const pool = variant?.pool?.length ? variant.pool : spec.pool;
+    const range = variant?.count ?? spec.hostiles;
     const rng = RNG.stream('spawn');
     const centre = this.world.volumeCentre(stop.volume);
+    // The FALL ladder raises the composition CEILING. It never raises anyone's structure or
+    // damage — a tier is more frames to rotate around, not tougher frames.
+    const ceiling = this.director.fall.arenaCeiling;
     const count = initial
-      ? rng.int(spec.hostiles[0], spec.hostiles[1])
-      : Math.max(1, Math.round((spec.hostiles[0] + spec.hostiles[1]) / 2) - 1);
-    if (count <= 0 || !spec.pool.length) return;
+      ? Math.min(ceiling, rng.int(range[0], range[1]))
+      : Math.max(1, Math.min(ceiling - 1, Math.round((range[0] + range[1]) / 2) - 1));
+    if (count <= 0 || !pool.length) return;
+    const spawned: Enemy[] = [];
 
     for (let i = 0; i < count; i++) {
-      const kind: ArchetypeId = initial ? rng.pick(spec.pool) : this.director.pickArchetype(spec.pool);
+      const kind: ArchetypeId = initial ? rng.pick(pool) : this.director.pickArchetype(pool);
       const bearing = initial
         ? (i / count) * Math.PI * 2 + rng.range(-0.3, 0.3)
         : this.director.spawnBearing(this.player);
@@ -373,14 +488,32 @@ export class Game {
       pos.y = this.world.groundAt(pos.x, pos.z) + (ARCHETYPES[kind].flying ? ARCHETYPES[kind].cruiseAltitude : 0);
       const e = new Enemy(ARCHETYPES[kind], this.ctx, pos);
       this.hostiles.push(e);
+      spawned.push(e);
       if (!initial) { this.fx.ring(pos, 3, 30, e.glow, 0.6); this.audio.warning(); }
     }
+    // Elite modifiers are behavioural only (see enemies/Elites.ts). Granted on the opening
+    // composition so the encounter's shape is legible from the first second.
+    const eliteCount = this.director.fall.elites + (initial ? (variant?.elites ?? 0) : 0);
+    if (initial && eliteCount > 0) {
+      const n = Math.min(eliteCount, spawned.length);
+      for (let i = 0; i < n; i++) {
+        const mod = i === 0 && variant?.eliteBias ? ELITES[variant.eliteBias] : pickElite();
+        spawned[i].makeElite(mod);
+        this.hud.toast(`${spawned[i].displayName} · ${mod.name} — ${mod.blurb}`);
+      }
+    }
+    // variant behaviour modifiers
+    if (variant?.suddenStart) for (const e of spawned) e.vitals.structure = Math.round(e.vitals.structureMax * variant.suddenStart);
+    if (variant?.tightWindups) for (const e of spawned) e.makeElite(ELITES.phased);
+    if (variant?.mirrorReactor) for (const e of spawned) e.makeElite(ELITES.relentless);
     if (!initial) this.hud.toast('REINFORCEMENTS');
   }
 
   private clearStop(stop: Stop) {
     if (stop.cleared) return;
     stop.cleared = true;
+    this.fields.clear();
+    this.transports.clear();
     this.world.openGate(stop.volume);
     if (stop.kind === 'node' && stop.state) {
       this.director.pilot.commitEncounter();
@@ -401,6 +534,127 @@ export class Game {
       this.hud.transit(tissue, tissue === 'OPEN FALL' ? 'DESCEND' : 'HOLD SPEED', next.label, true);
       this.transitTimer = 2.4;
     }
+  }
+
+  // ============================================================================= ONBOARDING
+  /**
+   * The authored opening. One ARENA volume, scripted spawns, and beats that only advance when
+   * the player has actually done the thing. Played once on first launch; skippable forever.
+   */
+  startOnboarding() {
+    this.audio.start();
+    this.audio.resume();
+    this.run.begin('TUTORIAL', 'vector', 1);
+    this.director.setFall(tierFor(1));
+    this.world.reset();
+    const chain = { id: 'tutorial', name: 'ORIENTATION', sequence: ['ARENA' as const], dominantStress: 'ROTATION' as const, tissue: [], sector: 1 };
+    const sector = this.world.beginSector([chain], 1, false);
+    this.stops = [];
+    this.stopIndex = 0;
+    this.appendStops(sector);
+    this.clearHostiles();
+    this.ordnance.clear();
+    this.fx.clear();
+    this.fields.clear();
+    this.player.applyBuild(this.run);
+    this.player.vitals.reset(this.player.mods.structure);
+    const node = this.stops[0];
+    this.player.pos.copy(this.world.entryPoint(node.volume));
+    this.player.yaw = Math.PI;
+    this.player.resetForEncounter(false);
+    this.director.resetEncounter(1);
+    this.metrics.begin('ORIENTATION', this.player.mods.structure, true);
+    // the tutorial owns spawning, so the encounter runner must not also stage waves
+    node.started = true;
+    node.cleared = false;
+    this.world.closeGate(node.volume);
+    this.simTime = 0;
+    this.timeScale = this.tsTarget = 1;
+    this.slowT = 0;
+    this.driven.clear();
+
+    this.mode = 'tutorial';
+    this.screens.hide();
+    this.hud.show(true);
+    this.hud.buildHardpoints(this.run);
+    this.hud.setBoss(null);
+    this.hud.setEncounter('ORIENTATION', 'ARENA', 0, 1, 'LEARN THE ARC', 'ROTATION');
+    this.input.menuMode = false;
+    this.input.lockPointer();
+    this.onboarding.begin();
+  }
+
+  private tutorialSpawn(kind: 'brawler' | 'lancer', bearing: number, distance: number) {
+    const f = this.player.forward();
+    const dir = f.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), bearing);
+    const p = this.player.pos.clone().addScaledVector(dir, distance);
+    this.world.confine(p, 30);
+    p.y = this.world.groundAt(p.x, p.z);
+    const e = new Enemy(ARCHETYPES[kind], this.ctx, p);
+    this.hostiles.push(e);
+    this.fx.ring(p, 3, 26, e.glow, 0.5);
+    return e;
+  }
+
+  private finishOnboarding() {
+    settings.markOnboarded();
+    this.hud.setTutorial(null);
+    this.hud.flash('ORIENTATION COMPLETE', '#8ff4ff');
+    this.mode = 'title';
+    setTimeout(() => this.showTitle(), 1400);
+  }
+
+  private updateTutorial(realDt: number, dt: number) {
+    if (this.input.pressed('pause')) { this.onboarding.skip(); return; }
+
+    const [lx, ly] = this.input.takeLook();
+    if (!this.rally.active) {
+      this.player.yaw += lx;
+      this.player.pitch = clamp(this.player.pitch + ly, T.pitchMin, T.pitchMax);
+    }
+    this.rally.tickReal(realDt);
+    const canAct = !this.rally.active;
+    this.player.update(dt, this.input, canAct);
+
+    // the encirclement beat: hostiles are walked onto stations around the player until the
+    // arc crosses 235°, then released so breaking out is actually possible
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const h of this.hostiles) {
+      const bearing = this.driven.get(h.id);
+      if (bearing !== undefined) {
+        const dir = this.player.forward().applyAxisAngle(up, bearing);
+        const want = this.player.pos.clone().addScaledVector(dir, 78);
+        this.world.confine(want, 20);
+        want.y = this.world.groundAt(want.x, want.z);
+        h.pos.lerp(want, Math.min(1, dt * 3.0));
+      }
+      h.update(dt);
+    }
+
+    this.ordnance.update(dt, this.simTime);
+    this.world.update(dt, this.simTime, this.player);
+    this.director.update(dt, this.hostiles as Hostile[], this.player, this.player.energy01);
+    this.metrics.tick(dt, this.director.arc, this.player.speed);
+
+    this.onboarding.maintain(this.onboardingWorld());
+    this.onboarding.update(dt, this.onboardingWorld());
+
+    this.rig.update(realDt, {
+      pos: this.player.pos, yaw: this.player.yaw, pitch: this.player.pitch,
+      assault: this.player.assault, locked: this.player.lock.hard ? this.player.lock.primary : null, speed: this.player.speed,
+    });
+    this.audio.setEngine(this.player.assault ? 1 : clamp01(this.player.speed / T.speed) * 0.6, this.player.assault ? 1 : 0, this.player.state === 'VERTICAL THRUST' ? 1 : 0, clamp01(this.player.speed / T.assaultSpeed));
+  }
+
+  private onboardingWorld() {
+    return {
+      player: this.player,
+      hostiles: this.hostiles,
+      arc: this.director.arc,
+      tokenCount: this.director.tokenCount,
+      perfectVanishes: this.metrics.perfectVanishes,
+      staggerPunishes: this.metrics.staggerPunishes,
+    };
   }
 
   // ================================================================================= FORGE
@@ -453,7 +707,7 @@ export class Game {
       this.hud.transit('FORGE', '', '', false);
       const offer = this.run.rollOffer();
       this.screens.showForge(this.run, offer, {
-        onUpgrade: (id: UpgradeId) => { this.run.takeUpgrade(id); this.player.applyBuild(this.run); this.audio.forgeAssemble(); },
+        onUpgrade: (card) => { this.run.takeUpgrade(card); this.player.applyBuild(this.run); this.audio.forgeAssemble(); },
         onEvolution: (id: EvolutionId, hp: HardpointId) => { this.run.takeEvolution(id, hp); this.player.applyBuild(this.run); this.audio.forgeAssemble(); },
         onLaunch: () => this.launchFromForge(stop),
       });
@@ -492,17 +746,34 @@ export class Game {
   // ================================================================================== BOSS
   private beginBoss(stop: Stop) {
     this.clearHostiles();
+    this.fields.clear();
     const centre = this.world.volumeCentre(stop.volume);
     const pos = new THREE.Vector3(centre.x, this.world.groundAt(centre.x, centre.z), centre.z);
-    this.boss = new Severance(this.ctx, pos);
-    this.boss.onPhaseChange = () => { this.hud.flash('PHASE 2', '#ff5a7a'); this.hud.toast('COUNTER-VANISH · 60% SEEDED · 4.0s COOLDOWN'); };
-    this.boss.onCounterVanish = () => { this.hud.flash('COUNTER-VANISH', '#ff5a7a'); };
-    this.hostiles.push(this.boss);
-    this.metrics.begin('SEVERANCE', this.player.vitals.structureMax, true);
-    this.hud.setBossBanner('SEVERANCE', 'ACE · EXECUTION', 'READ THE FRAME THAT READS YOU');
+
+    if (this.bossKind === 'gravemark') {
+      const g = new Gravemark(this.ctx, pos);
+      g.onPhaseChange = () => { this.hud.flash('PHASE 2', '#5ae8d4'); this.hud.toast('RELAY RESPAWN 14s → 9s · QUAKE ONLINE'); };
+      g.onScreenChange = (screened) => {
+        this.hud.flash(screened ? 'SCREENED' : 'SCREEN BROKEN', screened ? '#5ae8d4' : '#ffd24a');
+      };
+      this.boss = g;
+      this.hostiles.push(g);
+      g.deployEscort();
+      this.hud.setBossBanner('GRAVEMARK', 'FORMATION · ROTATION', 'DRIVE THE RELAYS OUT OF ITS REAR ARC');
+      this.hud.toast('ZERO STRUCTURAL DAMAGE WHILE 2+ RELAYS HOLD THE REAR 180°');
+    } else {
+      const sv = new Severance(this.ctx, pos);
+      sv.onPhaseChange = () => { this.hud.flash('PHASE 2', '#ff5a7a'); this.hud.toast('COUNTER-VANISH · 60% SEEDED · 4.0s COOLDOWN'); };
+      sv.onCounterVanish = () => { this.hud.flash('COUNTER-VANISH', '#ff5a7a'); };
+      this.boss = sv;
+      this.hostiles.push(sv);
+      this.hud.setBossBanner('SEVERANCE', 'ACE · EXECUTION', 'READ THE FRAME THAT READS YOU');
+    }
+
+    this.metrics.begin(this.bossLabelFor(this.run.sector), this.player.vitals.structureMax, true);
     this.hud.setBoss(this.boss);
     this.audio.bossRoar();
-    this.hud.flash('SEVERANCE', '#ff5a7a');
+    this.hud.flash(this.bossLabelFor(this.run.sector), this.bossKind === 'gravemark' ? '#5ae8d4' : '#ff5a7a');
   }
 
   // ================================================================================ events
@@ -515,7 +786,7 @@ export class Game {
     this.rig.punch(0.5);
 
     // SEVERANCE answers a read with a read: Counter-Vanish always starts a Reverse Rally.
-    if (this.boss && target === this.boss) {
+    if (this.boss instanceof Severance && target === this.boss) {
       if (this.boss.onPerfectVanished()) { this.startRally(this.boss, 'REVERSE'); return; }
     }
     if (this.rally.shouldEscalate()) this.startRally(target, 'RALLY');
@@ -590,9 +861,18 @@ export class Game {
     this.bossScore = this.metrics.result();
     this.run.encounterScores.push(this.bossScore);
     this.bossScore = null;
-    this.run.victory = true;
-    this.hud.flash('SEVERANCE DOWN', '#8ff4ff');
+    this.director.pilot.commitEncounter();
+    const stop = this.stops.find((x) => x.kind === 'boss' && x.sector === this.run.sector);
+    if (stop) { stop.cleared = true; this.world.openGate(stop.volume); }
+    this.hud.flash('BOSS DOWN', '#8ff4ff');
     this.enterSlow(0.2, 2.2);
+    if (this.run.sector < this.run.sectorPlan) {
+      // more sector to descend: the run continues through connective tissue
+      setTimeout(() => this.advanceSector(), 2000);
+      return;
+    }
+    this.run.victory = true;
+    fallProgress.recordClear(this.run.fall);   // clearing tier n unlocks tier n+1
     setTimeout(() => this.showResults(true), 2400);
   }
 
@@ -629,15 +909,19 @@ export class Game {
     resetHostileIds();
   }
 
+  /** Bullet-time duration is scalable 0.6x to 2.0x; the time scale itself is never assisted,
+   *  because that would change what the vanish reads like rather than how long you have. */
   enterSlow(scale: number, realDuration: number) {
     this.tsTarget = scale;
-    this.slowT = Math.max(this.slowT, realDuration);
+    this.slowT = Math.max(this.slowT, realDuration * settings.assists.bulletTimeScale);
   }
 
   // ================================================================================== loop
   frame(now: number) {
     const raw = (now - this.last) / 1000;
     this.lastFrameMs = raw * 1000;
+    this.frameLog.push(this.lastFrameMs);
+    if (this.frameLog.length > this.frameLogCap) this.frameLog.shift();
     this.frameAvg += (this.lastFrameMs - this.frameAvg) * 0.06;
     this.last = now;
     this.tick(Math.min(MAX_DT, raw));
@@ -670,6 +954,7 @@ export class Game {
       case 'pause': break;
       case 'results': this.updateIdleCamera(realDt); break;
       case 'dead': this.updateRun(realDt, dt); break;
+      case 'tutorial': this.updateTutorial(realDt, dt); break;
     }
 
     if (this.mode === 'title' || this.mode === 'results' || this.mode === 'pause' || this.mode === 'forge') this.screens.handleInput(this.input);
@@ -685,6 +970,10 @@ export class Game {
       if (this.transitTimer > 0) { this.transitTimer -= realDt; if (this.transitTimer <= 0) this.hud.transit('', '', '', false); }
     } else if (this.transitTimer > 0) this.transitTimer -= realDt;
 
+    // Sector lifecycle: spend a few ms building the next sector, and release any the player has
+    // left. Both are no-ops in a single-sector run.
+    this.world.pump();
+    if (this.mode === 'run') this.world.retirePassed(this.player.pos.z);
     const streamState = this.world.stream(this.player.pos.z);
     this.lighting.follow(this.player.pos);
     this.playerFill.position.copy(this.player.pos).setY(this.player.pos.y + 16);
@@ -732,10 +1021,12 @@ export class Game {
       this.mode = 'pause';
       this.input.menuMode = true;
       this.input.releasePointer();
-      this.screens.showPause(this.run, {
+      const openPause = () => this.screens.showPause(this.run, {
         onResume: () => { this.mode = 'run'; this.screens.hide(); this.input.menuMode = false; this.input.lockPointer(); },
         onAbandon: () => this.showResults(false),
+        onSettings: () => { this.screens.setSettingsReturnHandler(openPause); this.screens.showSettings('pause'); },
       });
+      openPause();
       return;
     }
 
@@ -754,6 +1045,8 @@ export class Game {
     for (const h of this.hostiles) h.update(dt);
     this.ordnance.update(dt, this.simTime);
     this.world.update(dt, this.simTime, this.player);
+    this.fields.update(dt, this.simTime, this.player);
+    this.transports.update(dt, (x, z) => this.world.groundAt(x, z));
 
     this.director.update(dt, this.hostiles as Hostile[], this.player, this.player.energy01);
     this.director.pilot.sample(dt, { airborne: !this.player.grounded, speed: this.player.speed, locked: !!this.player.lock.primary });
@@ -795,29 +1088,115 @@ export class Game {
     const stop = this.currentStop();
     if (!stop) return;
     const z = this.player.pos.z;
+    this.maybeQueueNextSector(stop);
 
     if (!stop.started && z >= stop.volume.z0 - 4) { this.beginStop(stop); return; }
     if (!stop.started) return;
 
     if (stop.kind === 'node' && stop.state && !stop.cleared) {
       const spec = ENCOUNTERS[stop.state];
-      const combat = spec.hostiles[1] > 0;
+      const variant = stop.variant;
+      const objective = variant?.objective ?? 'clear';
+      // reinforcement pacing is a FALL lever: how often pressure arrives, never how hard it hits
+      const waves = (variant?.waves ?? spec.waves) + this.director.fall.waveBonus;
+      const combat = objective !== 'reach-exit';
+
       if (combat) {
         if (this.hostiles.length === 0) {
-          if (this.wavesSpawned >= spec.waves) this.clearStop(stop);
+          if (this.wavesSpawned >= waves) { if (objective === 'clear' || objective === 'intercept') this.clearStop(stop); }
           else { this.wavesSpawned++; this.spawnWave(stop, false); this.waveT = this.director.pressure.reinforcementTiming; }
-        } else if (spec.waves > this.wavesSpawned) {
+        } else if (waves > this.wavesSpawned) {
           this.waveT -= 1 / 60;
           if (this.waveT <= 0) { this.wavesSpawned++; this.spawnWave(stop, false); this.waveT = this.director.pressure.reinforcementTiming; }
         }
-      } else if (z >= stop.volume.z1 - 40) {
-        this.clearStop(stop);
+      }
+
+      // --- variant objectives ---
+      switch (objective) {
+        case 'reach-exit':
+          if (z >= stop.volume.z1 - 40) this.clearStop(stop);
+          break;
+        case 'survive':
+          this.objectiveT -= 1 / 60;
+          this.hud.setObjective(variant!.brief, `HOLD ${Math.max(0, this.objectiveT).toFixed(0)}s`);
+          if (this.objectiveT <= 0) this.clearStop(stop);
+          break;
+        case 'destroy-targets': {
+          this.objectiveT -= 1 / 60;
+          const left = this.transports.remaining;
+          this.hud.setObjective(variant!.brief, `TRANSPORTS ${left} · ESCAPED ${this.transports.escaped} · ${Math.max(0, this.objectiveT).toFixed(0)}s`);
+          if (left === 0 || this.objectiveT <= 0) {
+            if (this.transports.escaped > 0) this.hud.flash(`${this.transports.escaped} ESCAPED`, '#ff5a5a');
+            this.clearStop(stop);
+          }
+          break;
+        }
+        case 'intercept':
+          this.objectiveT -= 1 / 60;
+          this.hud.setObjective(variant!.brief, `${this.hostiles.length} RUNNING · ${Math.max(0, this.objectiveT).toFixed(0)}s`);
+          if (this.objectiveT <= 0) { this.hud.flash('IT GOT AWAY', '#ff5a5a'); this.clearStop(stop); }
+          break;
+        default: break;
       }
     }
 
     if (stop.kind === 'boss') return;   // the run ends here
 
     if (stop.cleared && z >= stop.volume.z1 - 2) this.advanceStop();
+  }
+
+  /**
+   * The next sector starts building when the player reaches the last decision point of this
+   * one — a whole FORGE and a boss fight of lead time, spent a few milliseconds per frame.
+   */
+  private maybeQueueNextSector(stop: Stop) {
+    if (this.run.sector >= this.run.sectorPlan) return;
+    if (this.queuedSector > this.run.sector) return;
+    // trigger on the last decision point of this sector, or on the boss itself — whichever the
+    // player reaches first, so a skipped or short-circuited route still spools the next sector
+    const idx = this.stops.indexOf(stop);
+    const lastForgeIdx = this.stops.reduce((acc, x, i) => (x.kind === 'forge' && x.sector === this.run.sector ? i : acc), -1);
+    const reached = (lastForgeIdx >= 0 && idx >= lastForgeIdx) || stop.kind === 'boss';
+    if (!reached || !stop.started) return;
+
+    const nextIndex = this.run.sector + 1;
+    const sel = selectChains(1, this.run.chains[this.run.chains.length - 1]?.dominantStress ?? null);
+    this.nextChains = [sel.chains[0], sel.chains[1]];
+    this.nextLaw2 = sel.law2;
+    if (this.world.queueSector(this.nextChains, nextIndex, nextIndex < this.run.sectorPlan)) {
+      this.queuedSector = nextIndex;
+      this.hud.toast(`SECTOR ${String(nextIndex).padStart(2, '0')} SPOOLING`);
+    }
+  }
+
+  /**
+   * Cross a sector boundary. RunState, the pilot model, the build, weapon evolutions, score
+   * metrics and every RNG stream cursor are simply never touched — the boundary changes the
+   * world, not the run.
+   */
+  private advanceSector(): boolean {
+    if (this.run.sector >= this.run.sectorPlan) return false;
+    let next = this.world.current;
+    if (!next || next.sectorIndex === this.run.sector) {
+      // the background build has not landed yet: finish it now rather than stall the player
+      while (this.world.building) this.world.pump();
+      next = this.world.current;
+    }
+    if (!next || next.sectorIndex === this.run.sector) return false;
+
+    this.run.sector = next.sectorIndex;
+    this.run.chains = this.nextChains.length ? this.nextChains : this.run.chains;
+    this.run.law2 = this.nextLaw2 ?? this.run.law2;
+    this.run.chainIndex = 0;
+    this.nextChains = [];
+    this.appendStops(next);
+    this.stopIndex = this.stops.findIndex((x) => x.sector === next!.sectorIndex);
+    this.boss = null;
+    this.hud.setBoss(null);
+    this.hud.flash(`SECTOR ${String(next.sectorIndex).padStart(2, '0')}`, '#8ff4ff');
+    this.hud.toast(`PILOT MODEL AND BUILD CARRIED THROUGH · ${this.run.classification.name}`);
+    this.mode = 'run';
+    return true;
   }
 
   // ============================================================================== __state()
@@ -841,6 +1220,8 @@ export class Game {
     });
     g.__game = this;
     g.__classify = classify;
+    g.__fallProof = () => fallLadderProof();
+    g.__fallTiers = () => FALL_TIERS;
 
     /**
      * Deterministic replay harness.
@@ -903,7 +1284,7 @@ export class Game {
       heal: () => this.player.healToFull(),
       forceVanishWindow: () => this.hostiles.map((h) => ({ id: h.id, state: h.state, windup: h.windupRemaining })),
       skipToBoss: () => {
-        const bossStop = this.stops.findIndex((x) => x.kind === 'boss');
+        const bossStop = this.stops.findIndex((x, i) => x.kind === 'boss' && i >= this.stopIndex);
         if (bossStop < 0) return 'no boss';
         for (let i = 0; i < bossStop; i++) { this.stops[i].started = true; this.stops[i].cleared = true; this.world.openGate(this.stops[i].volume); }
         this.stopIndex = bossStop;
@@ -938,8 +1319,47 @@ export class Game {
         return 'ok';
       },
       worldBuilds: () => this.world.buildCount,
-      volumes: () => this.world.volumes.length,
+      volumes: () => this.world.volumeCount,
+      /** Lifecycle proof: chain N instances of Sector 1 and watch residency stay at two. */
+      setSectorPlan: (n: number) => { this.run.sectorPlan = Math.max(1, Math.min(8, Math.round(n))); return this.run.sectorPlan; },
+      lifecycle: () => ({
+        ...this.world.snapshot(),
+        runSector: this.run.sector,
+        sectorPlan: this.run.sectorPlan,
+        stops: this.stops.length,
+        memory: { geometries: this.renderer.info.memory.geometries, textures: this.renderer.info.memory.textures },
+        drawCalls: this.lastDrawCalls,
+        carried: {
+          upgrades: this.run.upgrades.length,
+          evolutions: this.run.evolutions.length,
+          encounterScores: this.run.encounterScores.length,
+          pilotProfile: this.director.pilot.profile,
+          streamCursors: RNG.cursors(),
+        },
+      }),
+      advanceSector: () => this.advanceSector(),
+      unlockAllFalls: () => { fallProgress.unlockAll(); return fallProgress.unlocked; },
+      setFall: (n: number) => { this.run.fall = Math.max(1, Math.min(FALL_TIERS.length, n)); this.director.setFall(tierFor(this.run.fall)); return this.director.fall; },
+      fall: () => ({ tier: this.director.fall, flankDebt: this.director.flankDebt, forwardBias: this.director.forwardBias, tokenCooldown: this.director.tokenCooldownSeconds }),
+      elites: () => this.hostiles.filter((h) => h.isElite).map((h) => ({ id: h.id, archetype: h.archetype, elite: h.elite?.name })),
+      variants: () => VARIANTS.map((v) => ({ id: v.id, state: v.state, name: v.name, geometry: v.geometry, objective: v.objective })),
+      variantsByState: () => Object.fromEntries(Object.entries(VARIANTS_BY_STATE).map(([k, v]) => [k, v.map((x) => x.id)])),
+      currentVariant: () => (this.variant ? { ...this.variant, fields: this.fields.snapshot(), transports: this.transports.remaining } : null),
+      /** Force the next entry into `state` to use a named variant — used to walk all 24. */
+      forceVariant: (id: string) => {
+        const v = VARIANTS.find((x) => x.id === id);
+        if (!v) return 'not found';
+        const stop = this.stops.find((x) => x.state === v.state && !x.cleared);
+        if (!stop) return 'no stop for state ' + v.state;
+        stop.variant = v;
+        stop.started = false;
+        return { stop: stop.label, variant: v.id };
+      },
       stops: () => this.stops.map((x) => ({ kind: x.kind, label: x.label, z0: x.volume.z0, z1: x.volume.z1, started: x.started, cleared: x.cleared })),
+      settings: () => ({ onboarded: settings.onboarded, assists: settings.snapshot() }),
+      startOnboarding: () => { this.startOnboarding(); return this.onboarding.beat.id; },
+      onboarding: () => ({ beat: this.onboarding.beat.id, t: +this.onboarding.t.toFixed(2), finished: this.onboarding.finished, story: this.onboarding.tokenStory() }),
+      resetOnboarding: () => { settings.onboarded = false; settings.save(); return settings.onboarded; },
 
       /** Put a hostile into a windup so the vanish window can be exercised deterministically. */
       forceWindup: (attack = 'sweep', remaining = 0.12) => {
@@ -986,6 +1406,79 @@ export class Game {
         return this.hostiles.length;
       },
       boss: () => (this.boss ? this.boss.snapshotBoss() : null),
+      bossKind: () => this.bossKind,
+      setBossKind: (k: 'severance' | 'gravemark') => { this.bossKind = k; return this.bossKind; },
+
+      /** Profiling: clear the field so a scenario measures only what it stages. */
+      clear: () => { this.clearHostiles(); this.ordnance.clear(); this.fx.clear(); return 0; },
+      /**
+       * Profiling: park the player just short of an open gate so the sample covers the transit
+       * and the streaming build of the volume beyond it — the one place a hitch is visible.
+       */
+      crossing: () => {
+        const stop = this.stops[this.stopIndex] ?? this.stops[0];
+        if (!stop) return 'no stop';
+        stop.started = true;
+        stop.cleared = true;
+        this.world.openGate(stop.volume);
+        this.clearHostiles();
+        const z = stop.volume.z1 - 70;
+        this.player.pos.set(0, this.world.groundAt(0, z), z);
+        this.player.vel.set(0, 0, 0);
+        this.mode = 'run';
+        return { label: stop.label, z: Math.round(z) };
+      },
+
+      // ---------------------------------------------------------------- profiling instrument
+      /** Clear the frame-time window so a scenario measures only itself. */
+      profileReset: () => { this.frameLog.length = 0; return true; },
+      /**
+       * A complete profile sample. Frame percentiles come from raw wall-clock deltas, not the
+       * simulation's clamped dt, so a stall is reported at its true cost.
+       */
+      profileSample: () => {
+        const f = this.frameLog.slice().sort((a, b) => a - b);
+        const pct = (p: number) => (f.length ? f[Math.min(f.length - 1, Math.floor(f.length * p))] : 0);
+        const mem = this.renderer.info.memory;
+        return {
+          adapter: this.adapter,
+          frames: f.length,
+          frameMs: { p50: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), p99: +pct(0.99).toFixed(2), worst: +(f[f.length - 1] ?? 0).toFixed(2) },
+          fps: { p50: +(1000 / Math.max(pct(0.5), 0.001)).toFixed(1), p95: +(1000 / Math.max(pct(0.95), 0.001)).toFixed(1) },
+          drawCalls: this.lastDrawCalls,
+          triangles: this.lastTriangles,
+          programs: this.renderer.info.programs?.length ?? 0,
+          geometries: mem.geometries,
+          textures: mem.textures,
+          pixelRatio: +this.pixelRatio.toFixed(2),
+          viewport: [Math.round(innerWidth), Math.round(innerHeight)],
+          hostiles: this.hostiles.length,
+          entities: this.hostiles.length + this.ordnance.entityCount,
+          residentSectors: this.world.residentCount,
+          volumes: this.world.volumeCount,
+        };
+      },
+      /**
+       * The half of the frame budget that is not the GPU. Ticks the simulation with rendering
+       * off and times each step, so CPU cost is measurable on any machine — including one with
+       * no GPU at all — and the renderer's share of the budget is what is left over.
+       */
+      simCost: (frames = 600) => {
+        const wasRender = this.renderEnabled, wasUi = this.uiEnabled;
+        this.renderEnabled = false;
+        this.uiEnabled = false;
+        const ms: number[] = [];
+        for (let i = 0; i < frames; i++) {
+          const t0 = performance.now();
+          this.tick(1 / 60);
+          ms.push(performance.now() - t0);
+        }
+        this.renderEnabled = wasRender;
+        this.uiEnabled = wasUi;
+        ms.sort((a, b) => a - b);
+        const pct = (p: number) => +ms[Math.min(ms.length - 1, Math.floor(ms.length * p))].toFixed(3);
+        return { frames, p50: pct(0.5), p95: pct(0.95), worst: +ms[ms.length - 1].toFixed(3) };
+      },
       step: (dt = 1 / 60, n = 1) => { for (let i = 0; i < n; i++) this.tick(dt); return this.state(); },
     };
   }

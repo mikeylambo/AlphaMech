@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { T } from '../core/Tuning';
 import { clamp, damp, rand } from '../core/MathUtil';
 import { Hostile } from './Types';
+import { settings } from '../core/Settings';
 
 /** Height above a machine's feet that the camera frames. */
 export const FOCUS_H = 7;
@@ -23,7 +24,7 @@ export class CameraRig {
   /** Slam the camera onto a target for `dur` seconds — used by the vanish and by rallies. */
   hardLock(target: Hostile, dur: number) { this.hardLockTarget = target; this.hardLockT = dur; }
   punch(amount: number) { this.kick = Math.min(1.4, this.kick + amount); }
-  addShake(amount: number) { this.shake = Math.min(1.4, this.shake + amount); }
+  addShake(amount: number) { this.shake = Math.min(1.4, this.shake + amount * settings.assists.cameraShake); }
 
   update(dt: number, p: {
     pos: THREE.Vector3; yaw: number; pitch: number; assault: boolean; locked: Hostile | null; speed: number;
@@ -74,7 +75,8 @@ export class CameraRig {
     this.camera.lookAt(focus);
     if (this.kick > 0) this.camera.rotateZ(this.kick * 0.03);
 
-    const wantFov = T.camFov + (p.assault ? T.camFovBoost - T.camFov : 0) + this.kick * 5;
+    const base = settings.assists.fov;
+    const wantFov = base + (p.assault ? T.camFovBoost - T.camFov : 0) + this.kick * 5;
     this.fov = damp(this.fov, wantFov, 7, dt);
     this.camera.fov = this.fov;
     this.camera.updateProjectionMatrix();

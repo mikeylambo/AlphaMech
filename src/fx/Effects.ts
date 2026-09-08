@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VFXManager } from './VFX';
 import { clamp01, rand } from '../core/MathUtil';
+import { settings } from '../core/Settings';
 
 /**
  * The readable layer: ground-plane telegraphs, tracers, beams, afterimages, decals.
@@ -43,13 +44,18 @@ export class Effects {
   }
 
   /** Ground telegraph. `grow` drives QUAKE, whose radius expands over the windup. */
+  /** High-contrast mode replaces the archetype tint with one unmistakable ring colour. */
+  static readonly HIGH_CONTRAST = 0xffffff;
+
   telegraph(pos: THREE.Vector3, radius: number, color: number, dur: number, grow = false, follow: THREE.Vector3 | null = null): Telegraph {
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+    const a = settings.assists;
+    const tint = a.telegraphHighContrast ? Effects.HIGH_CONTRAST : color;
+    const mat = new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
     const m = new THREE.Mesh(this.ringGeo, mat);
     m.position.set(pos.x, 0.3, pos.z);
     m.scale.setScalar(radius);
     m.renderOrder = 6;
-    const fill = new THREE.Mesh(this.discGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.05, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    const fill = new THREE.Mesh(this.discGeo, new THREE.MeshBasicMaterial({ color: tint, transparent: true, opacity: 0.05, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
     fill.name = 'fill';
     m.add(fill);
     this.group.add(m);
@@ -152,9 +158,12 @@ export class Effects {
       const s = t.grow ? t.radius * (0.25 + 0.75 * k) : t.radius * (1.32 - k * 0.32);
       t.mesh.scale.setScalar(s);
       const m = mat(t.mesh);
-      m.opacity = 0.28 + k * 0.72;
+      // telegraph intensity is independent of FX intensity: a player may turn the spectacle
+      // down without turning the reads down, or the reads up without the spectacle
+      const gain = settings.assists.telegraphIntensity * (settings.assists.telegraphHighContrast ? 1.25 : 1);
+      m.opacity = (0.28 + k * 0.72) * gain;
       const fill = t.mesh.children[0] as THREE.Mesh | undefined;
-      if (fill) (fill.material as THREE.MeshBasicMaterial).opacity = 0.04 + k * 0.18;
+      if (fill) (fill.material as THREE.MeshBasicMaterial).opacity = (0.04 + k * 0.18) * gain;
     }
   }
 

@@ -124,14 +124,14 @@ export class Ordnance {
   }
 
   /** Reactor Bleed: a staggered target drops a 40 EN core that persists 8.0s. */
-  spawnCore(pos: THREE.Vector3) {
+  spawnCore(pos: THREE.Vector3, energy: number = UPGRADE_VALUES.reactorBleedEnergy, life: number = UPGRADE_VALUES.reactorBleedLife) {
     const g = new THREE.Group();
     const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(1.9, 0), new THREE.MeshBasicMaterial({ color: 0x6fe0ff, wireframe: true, transparent: true, opacity: 0.9 }));
     const core = new THREE.Mesh(new THREE.SphereGeometry(0.9, 12, 10), new THREE.MeshBasicMaterial({ color: 0xd8fbff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }));
     g.add(shell, core);
     g.position.copy(pos).setY(this.hooks.groundAt(pos.x, pos.z) + 3);
     this.scene.add(g);
-    this.cores.push({ pos: g.position.clone(), life: UPGRADE_VALUES.reactorBleedLife, energy: UPGRADE_VALUES.reactorBleedEnergy, mesh: g });
+    this.cores.push({ pos: g.position.clone(), life, energy, mesh: g });
   }
 
   /** MIRROR CHASSIS / MIRRORWORK: the frame you left behind keeps shooting. */

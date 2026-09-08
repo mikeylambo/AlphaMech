@@ -5,6 +5,7 @@ import { clamp01, deg } from '../core/MathUtil';
 import { Hostile, PressureTarget } from '../frame/Types';
 import { ArchetypeId, ARCHETYPE_IDS } from '../enemies/Archetypes';
 import { PilotModel } from './PilotModel';
+import { FallTier, tierFor } from './Fall';
 
 /**
  * ============================================================================================
@@ -53,8 +54,16 @@ export class Director {
     reinforcementTiming: 14,
     bandPressure: 'MID',
   };
-  /** Raised by FLANK DEBT (GDD §8.2). Shapes orbit, never token count. */
+  /** Raised by FLANK DEBT (GDD §8.2) and by the FALL ladder. Shapes orbit, never token count. */
   forwardBias = T.orbitForwardBias;
+  /**
+   * The active FALL tier. It may move token COOLDOWN, orbit bias, composition, sequencing
+   * availability, bearing spread and wave pacing — and nothing else. It cannot reach
+   * `arcTokens`, which is a pure function of the arc and the sector.
+   */
+  fall: FallTier = tierFor(1);
+  /** FLANK DEBT, taken as a corrupted downside, stacks on top of the tier's bias. */
+  flankDebt = false;
   private enFloorHits = 0;
   private enWasFloor = false;
   private encounterTime = 0;
@@ -65,8 +74,12 @@ export class Director {
   get tokenCount() { return arcTokens(this._arc, this.sector).count; }
   get tokenSource() { return arcTokens(this._arc, this.sector).source; }
 
+  /** Set once per run, before the first encounter. */
+  setFall(tier: FallTier) { this.fall = tier; }
+
   resetEncounter(sector: number) {
     this.sector = sector;
+    this.forwardBias = Math.max(this.fall.forwardBias, this.flankDebt ? T.flankDebtBias : 0);
     this._arc = 0;
     this.tokenHolders = [];
     this.encounterTime = 0;
@@ -121,6 +134,7 @@ export class Director {
   private assignTokens(dt: number, hostiles: Hostile[]) {
     const alive = hostiles.filter((h) => h.alive);
     for (const h of alive) h.tokenCooldown = Math.max(0, h.tokenCooldown - dt);
+    // the ladder moves how quickly aggression RETURNS, never how much of it exists at once
 
     const budget = this.tokenCount;
     let held = alive.filter((h) => h.hasAttackToken);
@@ -155,7 +169,7 @@ export class Director {
    */
   mayOpenAttack(h: Hostile, hostiles: Hostile[]): boolean {
     if (!h.hasAttackToken) return false;
-    if (this.pressure.sequencing === 'ASYNC') return true;
+    if (this.fall.asyncAllowed && this.pressure.sequencing === 'ASYNC') return true;
     return !hostiles.some((o) => o !== h && o.alive && o.state === 'windup');
   }
 
@@ -198,7 +212,7 @@ export class Director {
 
     // ---- reinforcement timing ----
     const base = 16;
-    this.pressure.reinforcementTiming = base - p.velocity * 6 - conversionsPerMin * 0.25 + arc01 * 4;
+    this.pressure.reinforcementTiming = (base - p.velocity * 6 - conversionsPerMin * 0.25 + arc01 * 4) * this.fall.reinforcementScale;
 
     // ---- band pressure ----
     const altitude01 = clamp01(target.pos.y / 60);
@@ -215,12 +229,16 @@ export class Director {
   spawnBearing(target: PressureTarget): number {
     const rng = RNG.stream('spawn');
     const facing = Math.atan2(target.forward().x, target.forward().z);
-    return facing + this.pressure.bearing + rng.range(-0.35, 0.35);
+    return facing + this.pressure.bearing + rng.range(-this.fall.spawnSpread, this.fall.spawnSpread);
   }
+
+  /** Seconds before a hostile that released a token may take another. */
+  get tokenCooldownSeconds() { return this.sector >= 4 ? T.tokenCooldownS4 : this.fall.tokenCooldown; }
 
   snapshot() {
     return {
       arc: +this._arc.toFixed(2),
+      fall: { tier: this.fall.id, name: this.fall.name, tokenCooldown: this.fall.tokenCooldown, forwardBias: this.forwardBias, arenaCeiling: this.fall.arenaCeiling, asyncAllowed: this.fall.asyncAllowed, elites: this.fall.elites, corruptedFraction: this.fall.corruptedFraction },
       tokenCount: this.tokenCount,
       tokenSource: this.tokenSource,
       tokenHolders: this.tokenHolders.slice(),

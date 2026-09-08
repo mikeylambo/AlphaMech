@@ -10,6 +10,7 @@ import { rigFor, Chassis } from '../entities/RigCache';
 import { MechRig } from '../entities/MechRig';
 import { RigDriver } from '../entities/RigDriver';
 import { Telegraph } from '../fx/Effects';
+import { EliteModifier } from './Elites';
 
 let nextId = 1;
 export const resetHostileIds = () => { nextId = 1; };
@@ -43,7 +44,8 @@ export class Enemy implements Hostile {
   /** WARDEN's frontal shield. Breaks only to a Perfect Vanish punish or a pile driver from above. */
   shieldUp: boolean;
   shieldBroken = false;
-  private shieldMesh: THREE.Mesh | null = null;
+  get isElite() { return !!this.elite; }
+  protected shieldMesh: THREE.Mesh | null = null;
   protected telegraph: Telegraph | null = null;
   protected recoverT = 0;
   private strafeDir: number;
@@ -57,6 +59,8 @@ export class Enemy implements Hostile {
   private hitFlash = 0;
   /** Set by upgrades that slow hostile windups (Shared Fault). */
   windupSlow = 1;
+  /** Behavioural elite modifier, or null. Elites carry no stat inflation (non-negotiable 7). */
+  elite: EliteModifier | null = null;
   private lastGround = 0;
   protected baseScale = 1;
   /** PREDATOR READ lead-in: the attack is chosen and shown before the windup opens. */
@@ -97,6 +101,28 @@ export class Enemy implements Hostile {
     }
   }
 
+  /** Mark this frame as an elite. Behaviour only — structure, impact and damage are untouched. */
+  makeElite(mod: EliteModifier) {
+    this.elite = mod;
+    if (mod.frontalShield && !this.shieldUp) {
+      this.shieldUp = true;
+      const g = new THREE.CylinderGeometry(6.2, 6.2, 11, 20, 1, true, -0.9, 1.8);
+      const m = new THREE.MeshStandardMaterial({ color: 0x1a1206, emissive: this.spec.palette.glow, emissiveIntensity: 1.5, transparent: true, opacity: 0.55, side: THREE.DoubleSide, roughness: 0.3, metalness: 0.4 });
+      this.shieldMesh = new THREE.Mesh(g, m);
+      this.shieldMesh.position.set(0, 6, 4.6);
+      this.rig.root.add(this.shieldMesh);
+    }
+    // a visible mark: elites read at a glance without changing the silhouette contract
+    const halo = new THREE.Mesh(
+      new THREE.TorusGeometry(7.4, 0.34, 6, 30).rotateX(Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    halo.position.y = 0.9;
+    halo.name = 'eliteHalo';
+    this.rig.root.add(halo);
+    this.baseScale *= 1.08;
+  }
+
   get alive() { return this.vitals.alive; }
   get vanishable() { return this.state === 'windup' && this.windupRemaining > 0; }
   get glow() { return this.spec.palette.glow; }
@@ -106,7 +132,7 @@ export class Enemy implements Hostile {
   protected distance() { const d = this.ctx.target.pos.clone().sub(this.pos); d.y = 0; return d.length(); }
 
   releaseToken() {
-    if (this.hasAttackToken) { this.hasAttackToken = false; this.tokenCooldown = this.ctx.director.sector >= 4 ? T.tokenCooldownS4 : T.tokenCooldown; }
+    if (this.hasAttackToken) { this.hasAttackToken = false; this.tokenCooldown = this.ctx.director.tokenCooldownSeconds; }
   }
 
   cancelAttack() {
@@ -272,9 +298,17 @@ export class Enemy implements Hostile {
     } else {
       this.strafeT -= dt;
       if (this.strafeT <= 0) { this.strafeDir *= -1; this.strafeT = RNG.stream('ai').range(1.6, 3.4); }
-      wish.set(-d.z, 0, d.x).multiplyScalar(this.strafeDir);
-      // The forward bias is what turns orbiting into encirclement pressure. FLANK DEBT raises it.
+      wish.set(-d.z, 0, d.x).multiplyScalar(this.strafeDir * (this.elite?.orbitScale ?? 1));
+      // The forward bias is what turns orbiting into encirclement pressure. FLANK DEBT and the
+      // FALL ladder both raise it; neither can touch how many tokens exist.
       wish.addScaledVector(d, this.ctx.director.forwardBias);
+      // ANCHOR elites pull the rest of the formation onto themselves, so the arc will not close
+      // until the anchor is dealt with.
+      const anchor = this.ctx.hostiles.find((h) => h !== this && h.alive && (h as Enemy).elite?.cohesion);
+      if (anchor) {
+        const toAnchor = anchor.pos.clone().sub(this.pos).setY(0);
+        if (toAnchor.lengthSq() > 1) wish.addScaledVector(toAnchor.normalize(), (anchor as Enemy).elite!.cohesion);
+      }
     }
 
     if (this.ctx.confine(this.pos.clone(), 0)) {
@@ -314,6 +348,12 @@ export class Enemy implements Hostile {
   /** Weighted attack selection, straight from the archetype's authored percentages. */
   protected pickAttack(): AttackId {
     const rng = RNG.stream('ai');
+    // PHASED elites lean on the tightest read in their own table — a legal shaping of attack
+    // selection, which the Director Law already permits.
+    if (this.elite?.tightestRead) {
+      const weights = this.spec.attacks.map((a) => a.weight * (ATTACKS[a.id].windup <= 0.8 ? 3 : 1));
+      return rng.weighted(this.spec.attacks.map((a) => a.id), weights);
+    }
     return rng.weighted(this.spec.attacks.map((a) => a.id), this.spec.attacks.map((a) => a.weight));
   }
 
@@ -341,7 +381,7 @@ export class Enemy implements Hostile {
     this.ctx.onHostileWindupStart(this);
   }
 
-  protected enterRecover() { this.state = 'recover'; this.recoverT = this.currentAttack ? ATTACKS[this.currentAttack].recovery : 0.6; this.currentAttack = null; }
+  protected enterRecover() { this.state = 'recover'; this.recoverT = (this.currentAttack ? ATTACKS[this.currentAttack].recovery : 0.6) * (this.elite?.recoveryScale ?? 1); this.currentAttack = null; }
 
   protected hitTarget(attack: AttackId) {
     const spec = ATTACKS[attack];

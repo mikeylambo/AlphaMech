@@ -37,7 +37,7 @@ export const MINE = { armTime: 0.55, trigger: 10, life: 8.0 };
 /** Shield Advance specifics (GDD §7). */
 export const SHIELD_ADVANCE = { distance: 22, speed: 30 };
 
-export type ArchetypeId = 'lancer' | 'brawler' | 'sentry' | 'harrier' | 'warden';
+export type ArchetypeId = 'lancer' | 'brawler' | 'sentry' | 'harrier' | 'warden' | 'relay';
 export type BossId = 'severance';
 
 export interface Archetype {
@@ -72,6 +72,7 @@ export const ARCHETYPE_PALETTES: Record<ArchetypeId, MechPalette> = {
   sentry: P(0x3a4048, 0x22262b, 0x14171a, 0x646b74, 0x1e2226, 0x7ba8e0, 0x8fc0ff),
   harrier: P(0x4a4450, 0x2a2630, 0x16141a, 0x6b6674, 0x221f28, 0xc07aff, 0xd08aff),
   warden: P(0x413f3a, 0x262522, 0x151413, 0x6a675f, 0x201f1c, 0xffc247, 0xffd06a),
+  relay: P(0x33404a, 0x1e262c, 0x12171a, 0x5f6b74, 0x1c2226, 0x4ad0c0, 0x5ae8d4),
 };
 
 export const ARCHETYPES: Record<ArchetypeId, Archetype> = {
@@ -94,6 +95,17 @@ export const ARCHETYPES: Record<ArchetypeId, Archetype> = {
     id: 'harrier', name: 'HARRIER', structure: 2600, impactMax: 480, band: [40, 90], speed: 82, accel: 240, scale: 0.9,
     attacks: [{ id: 'strafe-run', weight: 50 }, { id: 'mine-drop', weight: 50 }],
     flying: true, cruiseAltitude: 34, frontalShield: false, palette: ARCHETYPE_PALETTES.harrier, chassis: 'drone',
+  },
+  /**
+   * RELAY — a formation unit, not a duellist. It is only dangerous while it is part of a
+   * screen; isolated, it is the flimsiest frame in the roster. Introduced here as GRAVEMARK's
+   * escort, and standing as a standard archetype for the 1.0 roster: one unit of work, two
+   * purposes.
+   */
+  relay: {
+    id: 'relay', name: 'RELAY', structure: 1800, impactMax: 400, band: [40, 90], speed: 58, accel: 190, scale: 0.86,
+    attacks: [{ id: 'volley', weight: 70 }, { id: 'mine-drop', weight: 30 }],
+    flying: false, cruiseAltitude: 0, frontalShield: false, palette: ARCHETYPE_PALETTES.relay, chassis: 'standard',
   },
   warden: {
     id: 'warden', name: 'WARDEN', structure: 7800, impactMax: 1900, band: [30, 70], speed: 28, accel: 90, scale: 1.0,

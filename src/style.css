@@ -40,7 +40,9 @@ canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block
 
 #ui { position: fixed; inset: 0; pointer-events: none; }
 #ui > * { pointer-events: none; }
-.clickable, button, .card, .opt { pointer-events: auto; }
+/* #ui > * outranks .screen on specificity, so screens are re-enabled by an equally strong rule */
+#ui > .screen { pointer-events: auto; }
+.clickable, button, .card, .opt, .setrow, .tab { pointer-events: auto; }
 
 /* ----------------------------------------------------------------------------- primitives */
 .label {
@@ -373,3 +375,96 @@ canvas#gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block
 /* =============================================================================== PROMPTS */
 #padHint { position: absolute; right: var(--hud-pad); top: var(--hud-pad); font-size: 10px; letter-spacing: 3px; color: var(--dust); opacity: 0; transition: opacity var(--tr); }
 #padHint.on { opacity: 1; }
+
+/* ================================================================================ SETTINGS */
+.tabs { display: flex; gap: 8px; margin: 22px 0 16px; }
+.tab {
+  font-family: inherit; font-size: 12px; letter-spacing: 4px; padding: 8px 20px; cursor: pointer;
+  background: transparent; color: var(--dust); border: 1px solid rgba(255,255,255,.14);
+  transition: color var(--tr-fast), border-color var(--tr-fast), background var(--tr-fast);
+}
+.tab.on { color: var(--bone); border-color: var(--ember); background: rgba(255,122,42,.1); }
+.tab.sel { border-color: var(--ember); color: var(--bone); }
+
+.setrow {
+  display: grid; grid-template-columns: 1fr 130px; grid-template-areas: "k v" "n n";
+  gap: 1px 16px; padding: 9px 12px; cursor: pointer; align-items: baseline;
+  border-left: 2px solid transparent; background: rgba(255,255,255,.015);
+  transition: background var(--tr-fast), border-color var(--tr-fast);
+}
+.setrow + .setrow { margin-top: 2px; }
+.setrow .k { grid-area: k; font-size: 13px; letter-spacing: 2.6px; color: var(--bone); }
+.setrow .v { grid-area: v; font-size: 14px; text-align: right; color: var(--cyan); letter-spacing: 1px; }
+.setrow .n { grid-area: n; font-size: 9.5px; letter-spacing: 2px; color: rgba(169,153,138,.62); margin-top: 2px; }
+.setrow:hover, .setrow.sel { background: rgba(255,122,42,.09); border-left-color: var(--ember); }
+.setrow.sel .v::before { content: '‹ '; color: var(--ember); }
+.setrow.sel .v::after { content: ' ›'; color: var(--ember); }
+.setrow.changed .k::after { content: ' ·'; color: var(--warn); }
+.setrow.changed .v { color: var(--warn); }
+.setrow.bind.capturing { border-left-color: var(--warn); background: rgba(255,210,74,.12); }
+.setrow.bind.capturing .v { color: var(--warn); }
+.setrow.sel.bind .v::before, .setrow.sel.bind .v::after { content: none; }
+
+/* assist disclosure on the results screen */
+#results .brow b.assist-none { color: var(--good); }
+#results .brow b.assist-on { color: var(--warn); }
+#results .brow.assist { opacity: .78; }
+#results .brow.assist span { padding-left: 12px; }
+#results .brow.assist b { color: var(--warn); }
+
+/* ============================================================================== CORRUPTED */
+.card.corrupted { border-color: rgba(255,90,90,.36); background: linear-gradient(165deg, rgba(44,22,24,.88), rgba(16,10,11,.93)); }
+.card.corrupted::after { background: var(--bad); }
+.card.corrupted .verb { color: var(--bad); }
+.card.corrupted:hover, .card.corrupted.sel { border-color: var(--bad); box-shadow: 0 18px 40px -22px rgba(255,90,90,.7); }
+.card .downside {
+  margin-top: 8px; padding: 7px 9px; font-size: 11px; line-height: 1.5;
+  background: rgba(255,90,90,.09); border-left: 2px solid var(--bad); color: #ffb9b9;
+}
+.card .downside b { color: var(--bad); letter-spacing: 2px; }
+
+/* ============================================================================ FALL LADDER */
+.falls { display: flex; gap: 5px; flex-wrap: wrap; }
+.fall {
+  font-family: inherit; min-width: 58px; padding: 9px 6px 8px; cursor: pointer;
+  background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.12); color: var(--dust);
+  transition: color var(--tr-fast), border-color var(--tr-fast), background var(--tr-fast), transform var(--tr-fast);
+}
+.fall .n { display: block; font-size: 15px; letter-spacing: 2px; font-weight: 600; }
+.fall:hover, .fall.sel { border-color: var(--ember); color: var(--bone); transform: translateY(-2px); }
+.fall.on { background: var(--ember); border-color: var(--ember); color: #170c04; }
+.fall.locked { opacity: .3; cursor: not-allowed; }
+.fall.locked .n::after { content: ' ·'; }
+.fallnote { margin-top: 10px; font-size: 10.5px; letter-spacing: 2px; color: var(--dust); line-height: 1.75; }
+.fallnote b { color: var(--ember); }
+.fallnote .rule-note { color: rgba(143,244,255,.65); letter-spacing: 2.4px; }
+
+/* GRAVEMARK's screen state is the only thing the boss bar needs to shout */
+#bossbar.screened .track > i { background: linear-gradient(90deg, #7ff0e2, #2fa89a); }
+#bossbar.screened .cv { color: var(--cyan); }
+#bossbar:not(.screened) .cv { color: var(--warn); }
+
+/* ============================================================================== ONBOARDING */
+#tutorial {
+  position: absolute; left: 50%; top: 20%; transform: translateX(-50%); text-align: center;
+  opacity: 0; transition: opacity var(--tr); pointer-events: none;
+}
+#tutorial.on { opacity: 1; }
+#tutorial .p {
+  font-size: 54px; letter-spacing: 16px; font-weight: 700; color: var(--bone);
+  text-shadow: 0 0 40px rgba(255,122,42,.55), 0 2px 6px rgba(6,4,3,.9);
+  animation: tutpulse 2.4s ease-in-out infinite;
+}
+#tutorial .h { font-size: 12px; letter-spacing: 5px; color: var(--cyan); margin-top: 6px; }
+#tutorial .s { font-size: 9px; letter-spacing: 4px; color: rgba(169,153,138,.55); margin-top: 12px; }
+@keyframes tutpulse { 0%, 100% { opacity: 1; } 50% { opacity: .72; } }
+
+/* first-launch nudge: the ORIENTATION button breathes until it has been played once */
+.btn.ghost.urge {
+  border-color: #8ff4ff; color: #d8fdff;
+  animation: urge 2.4s ease-in-out infinite;
+}
+@keyframes urge {
+  0%, 100% { box-shadow: 0 0 0 rgba(143, 244, 255, 0); }
+  50% { box-shadow: 0 0 18px rgba(143, 244, 255, 0.32); }
+}

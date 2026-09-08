@@ -5,10 +5,19 @@ import { EvolutionId, HardpointId, HARDPOINT_ORDER, evolutionFor } from './Weapo
 import { ChainSpec, selectChains } from '../director/Chains';
 import { StressTag } from '../director/Encounters';
 import { classify, Classification } from './Disciplines';
+import { CorruptedOffer, DOWNSIDE_IDS, DownsideId } from './Corrupted';
+import { FallTier, tierFor } from '../director/Fall';
 import { EncounterScore } from '../score/Metrics';
+import { settings, Assists, DEFAULT_ASSISTS, assistsAreDefault } from '../core/Settings';
+
+/** A FORGE upgrade card is either clean or corrupted; corrupted carries exactly one downside. */
+export interface UpgradeCard {
+  id: UpgradeId;
+  corrupted: CorruptedOffer | null;
+}
 
 export interface ForgeOffer {
-  upgrades: UpgradeId[];
+  upgrades: UpgradeCard[];
   /** One card per un-evolved hardpoint — every currently eligible evolution, take one. */
   evolutions: { hardpoint: HardpointId; evolution: EvolutionId }[];
 }
@@ -17,6 +26,13 @@ export interface ForgeOffer {
 export class RunState {
   seed = '';
   sector = 1;
+  /** How many sectors this run plays. 1.0 ships four; Sector 1 is all that exists today, and
+   *  the lifecycle proof chains three instances of it. */
+  sectorPlan = 1;
+  /** Selected FALL tier, 1..10. */
+  fall = 1;
+  /** Corrupted variants taken this run, with the downside each one carried. */
+  corrupted: CorruptedOffer[] = [];
   reactor: ReactorId = 'vector';
   upgrades: UpgradeId[] = [];
   evolutions: EvolutionId[] = [];
@@ -32,11 +48,23 @@ export class RunState {
   completed = false;
   victory = false;
   elapsed = 0;
+  /**
+   * Non-negotiable 8: the assist configuration is captured on every run, including runs with
+   * every assist off. Leaderboards ship later; if these flags are not written from the first
+   * run, historical runs can never be segmented.
+   */
+  assists: Assists = { ...DEFAULT_ASSISTS };
+  assistsAllDefault = true;
+  assistSnapshot: Record<string, unknown> = {};
 
-  begin(seed: string, reactor: ReactorId) {
+  get tier(): FallTier { return tierFor(this.fall); }
+
+  begin(seed: string, reactor: ReactorId, fall = this.fall) {
     RNG.init(seed);
     this.seed = seed;
     this.reactor = reactor;
+    this.fall = fall;
+    this.corrupted = [];
     this.sector = 1;
     this.upgrades = [];
     this.evolutions = [];
@@ -49,6 +77,9 @@ export class RunState {
     this.completed = false;
     this.victory = false;
     this.elapsed = 0;
+    this.assists = { ...settings.assists };
+    this.assistsAllDefault = assistsAreDefault(this.assists);
+    this.assistSnapshot = settings.snapshot();
     const sel = selectChains(this.sector, null);
     this.chains = [sel.chains[0], sel.chains[1]];
     this.law2 = sel.law2;
@@ -60,6 +91,7 @@ export class RunState {
   get classification(): Classification { return classify(this.upgrades, this.evolutions); }
 
   hasUpgrade(id: UpgradeId) { return this.upgrades.includes(id); }
+  isCorrupted(id: UpgradeId) { return this.corrupted.some((c) => c.upgrade === id); }
   hasEvolution(id: EvolutionId) { return this.evolutions.includes(id); }
 
   /**
@@ -89,15 +121,40 @@ export class RunState {
     const rest = rng.shuffle(pool.filter((id) => !picked.includes(id)));
     while (picked.length < 3 && rest.length) picked.push(rest.pop()!);
 
+    /**
+     * Corrupted frequency is a FALL lever (§3.1). The GDD introduces corrupted variants
+     * "always offered alongside a clean option"; the ladder's terminal tier deliberately
+     * removes that guarantee, which is FALL X's identity. Below FALL X at least one clean
+     * card is always present.
+     */
+    const fraction = this.tier.corruptedFraction;
+    const cards: UpgradeCard[] = picked.map((id) => ({ id, corrupted: null }));
+    if (fraction > 0) {
+      const maxCorrupt = fraction >= 1 ? cards.length : Math.max(1, Math.min(cards.length - 1, Math.round(cards.length * fraction)));
+      const order = rng.shuffle(cards.map((_, i) => i));
+      for (let n = 0; n < maxCorrupt; n++) {
+        const card = cards[order[n]];
+        const downside = rng.pick(DOWNSIDE_IDS) as DownsideId;
+        card.corrupted = {
+          upgrade: card.id,
+          downside,
+          ...(downside === 'hardpoint-lockout' ? { lockedHardpoint: rng.pick(HARDPOINT_ORDER) } : {}),
+        };
+      }
+    }
+
     const evolutions = HARDPOINT_ORDER
       .filter((h) => !this.evolvedHardpoints.includes(h))
       .map((h) => ({ hardpoint: h, evolution: evolutionFor(h).id }));
 
-    return { upgrades: picked, evolutions };
+    return { upgrades: cards, evolutions };
   }
 
-  takeUpgrade(id: UpgradeId) {
+  takeUpgrade(card: UpgradeCard | UpgradeId) {
+    const id = typeof card === 'string' ? card : card.id;
+    const corrupted = typeof card === 'string' ? null : card.corrupted;
     if (!this.upgrades.includes(id)) this.upgrades.push(id);
+    if (corrupted && !this.isCorrupted(id)) this.corrupted.push(corrupted);
     const v = UPGRADES[id].verb;
     this.verbUsage[v] = (this.verbUsage[v] ?? 0) + 1;
   }
@@ -118,6 +175,10 @@ export class RunState {
       nodeIndex: this.nodeIndex,
       previousChainStress: this.previousChainStress,
       chainLaw2: this.law2,
+      assists: this.assistSnapshot,
+      fall: { tier: this.fall, name: this.tier.name },
+      corrupted: this.corrupted.map((c) => `${c.upgrade}:${c.downside}${c.lockedHardpoint ? `:${c.lockedHardpoint}` : ''}`),
+      sectorPlan: this.sectorPlan,
     };
   }
 }

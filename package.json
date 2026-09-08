@@ -7,7 +7,8 @@
     "dev": "vite --port 5180 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 5181",
-    "verify": "tsc --noEmit"
+    "verify": "tsc --noEmit",
+    "profile": "vite build && node tools/profile.mjs --preview"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",
