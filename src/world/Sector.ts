@@ -52,12 +52,15 @@ export const SECTOR_LOOKS: Record<number, SectorLook> = {
   },
   2: {
     id: 2, name: 'SECTOR 02', subtitle: 'MANUFACTURE',
-    fog: 0x2b3a46, fogNear: 180, fogFar: 1700,
-    skyZenith: 0x0d1418, skyHorizon: 0xc4531c,
-    sunColour: 0xff8c3a, sunIntensity: 1.5,
-    hemiSky: 0x50708a, hemiGround: 0x3a1c0e, hemiIntensity: 1.15,
-    rimColour: 0x7fd8ff, rimIntensity: 1.35,
-    ground: 0x4a5560,
+    // §12: "Manufacture: blue-grey, high fog, vertical." The heat is LOCAL — the casting channel,
+    // the pour, an arm's nozzle — and the volume around it is cold. A warm ambient would make the
+    // hot geometry stop reading as hot, which is the one thing the sector's telegraphs need.
+    fog: 0x26333d, fogNear: 120, fogFar: 1150,
+    skyZenith: 0x090e12, skyHorizon: 0x7a4a30,
+    sunColour: 0xff8c3a, sunIntensity: 1.25,
+    hemiSky: 0x5c7d96, hemiGround: 0x2e2622, hemiIntensity: 1.25,
+    rimColour: 0x8fe0ff, rimIntensity: 1.5,
+    ground: 0x46515c,
     // the glow is BELOW the horizon: the casting floor is the brightest thing in the sector
     interior: true, skyDir: [0.18, -0.42, 0.89], keyDir: [0.38, 0.86, -0.34],
   },
@@ -82,10 +85,10 @@ void main(){
   // from beneath, and the top of the volume goes almost black, so the sector reads as roofed.
   c += uSun * pow(s, 320.0) * 3.4 * (1.0 - uInterior);
   c += uSun * pow(s, 9.0) * mix(0.55, 0.22, uInterior);
-  c += uSun * pow(s, 2.0) * mix(0.18, 0.55, uInterior) * (1.0 - t);
+  c += uSun * pow(s, 2.0) * mix(0.18, 0.30, uInterior) * (1.0 - t);
   vec3 below = c * 0.62 + uHorizon * 0.16;
   c = mix(below, c, smoothstep(-0.10, 0.03, d.y));
-  c *= mix(1.0, 1.0 - smoothstep(0.15, 0.95, d.y) * 0.72, uInterior);
+  c *= mix(1.0, 1.0 - smoothstep(0.02, 0.75, d.y) * 0.85, uInterior);
   gl_FragColor = vec4(c, 1.0);
 }`;
 

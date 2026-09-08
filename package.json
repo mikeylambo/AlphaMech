@@ -1,14 +1,16 @@
 {
   "name": "blinkfall",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port 5180 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 5181",
     "verify": "tsc --noEmit",
-    "profile": "vite build && node tools/profile.mjs --preview"
+    "profile": "vite build && node tools/profile.mjs --preview",
+    "gates": "node tools/v03.mjs && node tools/content.mjs && node tools/variants.mjs && node tools/loop.mjs && node tools/lifecycle.mjs && node tools/fallcheck.mjs && node tools/gravemark.mjs && node tools/onboarding.mjs && node tools/settings.mjs",
+    "ladder": "node tools/ladder.mjs"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",

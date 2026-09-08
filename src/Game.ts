@@ -557,6 +557,10 @@ export class Game {
       }
 
       if (combat) {
+        // Combat is movement; story is stillness. Any comm line still on screen is taken down as
+        // the fight begins, so rule 1 is enforced by the encounter runner rather than by the
+        // authoring discipline of whoever adds the next line.
+        this.hud.clearComm();
         this.world.closeGate(stop.volume);
         this.spawnWave(stop, true);
         this.waveT = this.director.pressure.reinforcementTiming;
@@ -1649,6 +1653,8 @@ export class Game {
         return this.director.fall;
       },
       elites: () => this.hostiles.filter((h) => h.isElite).map((h) => ({ id: h.id, archetype: h.archetype, elite: h.elite?.name })),
+      /** The authored modifier table, so a probe grants the real thing rather than a copy of it. */
+      eliteSpec: (id: string) => ELITES[id as keyof typeof ELITES] ?? null,
       variants: () => VARIANTS.map((v) => ({ id: v.id, state: v.state, name: v.name, geometry: v.geometry, objective: v.objective })),
       /** Earliest sector each state exists in, so a walk knows how deep to go to reach it. */
       stateDepths: () => Object.fromEntries((Object.keys(ENCOUNTERS) as EncounterId[]).map((k) => [k, ENCOUNTERS[k].fromSector])),
@@ -1830,7 +1836,11 @@ export class Game {
       stageVariant: (id: string) => {
         const v = VARIANTS.find((x) => x.id === id);
         if (!v) return 'no such variant: ' + id;
-        const idx = this.stops.findIndex((x) => x.kind === 'node' && x.state === v.state);
+        // Prefer a stop in the sector the run is CURRENTLY in. Taking the first match anywhere
+        // silently stages a Sector 1 volume for a Sector 2 configuration, which then measures and
+        // photographs the wrong sector entirely.
+        const here = this.stops.findIndex((x) => x.kind === 'node' && x.state === v.state && x.sector === this.run.sector);
+        const idx = here >= 0 ? here : this.stops.findIndex((x) => x.kind === 'node' && x.state === v.state);
         if (idx < 0) return 'no stop for state ' + v.state;
         for (let i = 0; i < idx; i++) { this.stops[i].started = true; this.stops[i].cleared = true; this.world.openGate(this.stops[i].volume); }
         for (let i = idx; i < this.stops.length; i++) { this.stops[i].started = false; this.stops[i].cleared = false; this.world.closeGate(this.stops[i].volume); }

@@ -990,3 +990,500 @@ The Ceiling Pass delivered six of seven scope items and the seventh's implementa
 system that was supposed to catch a fake difficulty ladder caught one — twice. That is the
 result: **not a clean sweep, and the failure is the useful part.**
 
+
+---
+---
+
+# v0.3 — SECTOR 2 · MANUFACTURE
+
+Companion to `blinkfall-1.0-rc-brief.md` §5 and `blinkfall-gdd-v2.3-patch.md`.
+Same rule as every phase before it: **measured, not asserted.**
+
+---
+
+## 23. What v0.3 was asked for, and what shipped
+
+The RC brief's v0.3 line, item by item.
+
+| Scope item | Status | Where |
+|---|---|---|
+| Sector 2 world and palette | **SHIPPED** | §24 |
+| CHORUS | **SHIPPED** | §25 |
+| KILNWORKS | **SHIPPED** | §25 |
+| OBJECTIVE state + 4 configurations | **SHIPPED** | §26 |
+| SPLITTER · HOOK | **SHIPPED** | §27 |
+| NULLPOINT · BREAKER | **SHIPPED** | §27 |
+| upgrades to 30 | **SHIPPED** | §27 |
+| weapon evolution tier-1 completion (12) | **SHIPPED** | §27 |
+| 11 Sector 2 chains | **SHIPPED** | §24 |
+| narrative syntax probe | **SHIPPED** | §30 |
+| one sector palette of music | **SHIPPED** | §24 |
+
+Plus **five defects in previously shipped code**, every one of them found by an instrument that
+measured something and got an answer that could not be true (§28), two instrument defects fixed
+alongside them, and two design changes that measurement forced (§29).
+
+**The new instrument is `tools/v03.mjs`.** Twelve sections, sixty-eight rows, every row printing
+the measurement it was decided on rather than a verdict alone. A row that passes for the wrong
+reason is visible in its own evidence.
+
+---
+
+## 24. Sector 2 is distinguishable in more than palette
+
+This is the phase's playtest gate, so it was built as an engineering gate first: what, precisely,
+is different about MANUFACTURE besides its fog colour?
+
+**The look inverts.** Sector 1's key light comes from behind the camera, its horizon is bright and
+its sky has a sun disc. Sector 2 has no sun at all — the sky shader takes an `uInterior` uniform
+that removes the disc, darkens the zenith toward black, and broadens the warm bloom *below* the
+horizon, because the brightest thing in a foundry is the floor. The lighting crossfades at the
+boundary rather than being rebuilt, so the descent is a modulation and not a cut.
+
+```
+SECTOR 01  EXTERIOR      interior false   sky sun ahead and low     music EXTERIOR    (A, 108bpm)
+SECTOR 02  MANUFACTURE   interior true    glow from beneath         music MANUFACTURE (E, 96bpm)
+```
+
+**The geometry changes kind, not dressing.** Sector 1 rings its volumes with a distant skyline
+that reads as *distance*. Sector 2 rings them with cooling stacks that begin just outside the
+play space and read as *enclosure*, adds a casting channel across the floor, and closes the
+volume with a roof above the altitude cap. Same draw budget, opposite feeling.
+
+**The machines alter the environment.** §2.3 promises "moving platforms, active hazards, conveyor
+volumes", so Sector 2 has conveyor bands: a strip of floor that carries the pilot **and every
+hostile standing on it** at 17 m/s. A formation holding a bearing drifts out of it for free, and
+holding position costs continuous thrust. It touches no damage value, no structure value and no
+arc threshold — it is positional pressure and nothing else, which is the only kind Sector 2 is
+allowed to add.
+
+```
+conveyor bands per Sector 2 sector : 3
+drift measured in one second       : 17.0m
+same measurement in Sector 1       : 0.0m
+```
+
+**The roster widens.** `poolFor(state, sector)` adds SPLITTER and HOOK to ARENA, PURSUIT, STORM
+and OBJECTIVE from Sector 2 — added to the states whose question they sharpen, not to everything.
+A DUEL against a SPLITTER would just be two duels, and a HUNT is airborne.
+
+**Eleven chains, to the brief's shape.**
+
+```
+sector 2 chain pool  total 11  standard 7  rare 2  reactor 1  secret 1
+law 1 (no repeats)   true      law 4 (DIRECT is S4)  true      states exist at depth  true
+```
+
+The reactor chain is ANVIL SHIFT and only exists while running BREAKER — two consecutive holds
+where withdrawing is expensive, which is what a chassis whose impact never decays wants a fight to
+be. The secret chain is THE CLEAN LINE, reachable on an untouched structure bar, and it is
+deliberately the hardest sequence in the pool.
+
+**A second palette for the score.** Not a second track: the same generative score running on a
+different parameter set. Down a fourth to E, a narrower and more dissonant chord table, a shorter
+and harder room, metallic hats, 96 bpm instead of 108. The drone voices are retuned rather than
+rebuilt, so a boundary is a modulation.
+
+---
+
+## 25. The two Sector 2 bosses
+
+Every sector offers two different **classes**, so the exam changes with the seed rather than only
+the model.
+
+### CHORUS — FORMATION, 34,000, three voices, one pool
+
+The GDD gives the shape: *"Three linked frames, one shared pool of 34,000, three separate bands,
+independently granted tokens."* The design question was what makes it a different rotation exam
+from GRAVEMARK, which already tests rotation.
+
+**GRAVEMARK is a rotation exam in the BOSS's frame of reference** — its escorts hold station in
+*its* rear arc, and you win by out-rotating a yaw-rate-capped facing.
+
+**CHORUS is a rotation exam in YOUR frame of reference**, and it is the purest available statement
+of Law II as v2.3 corrects it. The three voices hold bearing stations 120° apart around the pilot.
+While the arc they subtend **from where you are** stands at or above 180°, the shared pool refuses
+structural damage entirely. Turning the camera cannot change that number — the arc is
+rotation-invariant. Only moving can.
+
+The 180° threshold is not a tuning knob. PATCH 2 establishes that two hostiles can never exceed
+180°, so a threshold at exactly 180 says *"you have made three frames behave like two"*.
+
+It is also the boss that teaches PATCH 2 directly. Left alone the trio subtends ~240°, which is
+above the harmony gate **and** above the 235° token line — so a pilot who does not move is both
+unable to damage the pool and paying a second attack token for the privilege.
+
+```
+settled span, pilot stationary   220°   (stations at 0° / 120° / 240°)
+harmony gate                     180°
+damage applied while in harmony  0 of 5,000   ·  refused 5,000  ·  structure unchanged
+```
+
+### KILNWORKS — WAR MACHINE, 44,000, and the arena leaves
+
+The foundry line is the boss. A pour head and four feed arms, bolted to a casting line that
+**travels for the entire fight**. Nothing about the machine chases you; what it does is leave,
+continuously, so a position that solved the fight one second ago is behind you the next. That is a
+piloting exam by construction rather than by pressure.
+
+Three gates, three different acts:
+
+1. **Sever four feed arms.** The head refuses structural damage while any arm stands.
+2. **Ride the line.** With the arms gone the line reverses and speeds up by 45%.
+3. **Kill the pour.** The head is armoured frontally, so the only damage that lands comes from
+   *behind* it — which on a travelling line means riding against its own direction of travel.
+
+The combat contract is untouched. The head and the arms are ordinary hostiles: they take ordinary
+tokens out of the ordinary budget the encirclement arc pays for, they telegraph on the ground
+plane, and every windup is vanishable. A war machine is large, so the arc it subtends is wide, and
+a wide arc buys tokens — that is the sovereign rule working, not an exception to it.
+
+```
+structure         44,000 = head 23,200 + 4 arms x 5,200
+line travel       26 m/s phase 1  ->  37.7 m/s phase 2, direction reversed
+head, arms up     4,000 damage refused, head structure unchanged
+head, from front  refused        head, from behind  damaged
+token source      encirclement-arc(45.3°) <= 235° -> 1
+```
+
+### The two exams, side by side
+
+| | CHORUS | KILNWORKS |
+|---|---|---|
+| Class | FORMATION | WAR MACHINE |
+| Damage gate | the span the trio subtends from you | the feed arms, then the head's frontal armour |
+| What you must do | collapse three bearings into one | ride a line that will not stop |
+| Does the arena move? | no | yes, for the whole fight |
+| Beaten by | out-rotating a formation | never holding a position |
+
+---
+
+## 26. OBJECTIVE — the seventh state
+
+The state exists to ask a different question from ARENA using the same systems. ARENA asks *can
+you keep them in front of you*; OBJECTIVE asks *can you keep them in front of you while the thing
+you must protect is behind you*. That is the same skill under a positional constraint you did not
+choose, which is why its primary stress is still ROTATION.
+
+| Configuration | Objective | What it asks |
+|---|---|---|
+| DEFEND | hold an emplacement through the waves | rotate around a fixed point instead of around yourself |
+| ASSASSINATE | one marked frame inside a formation | reach one bearing through four that would rather you did not |
+| INTERCEPT | four transports, none may cross | split your attention between a formation and a clock |
+| ESCORT | a moving asset that decides where you stand | hold a formation in front of a point that will not stop travelling |
+
+DEFEND and ESCORT share one class: an escort is a defend point with a velocity, and pretending
+otherwise would be two systems for one idea. The point is **not a combatant** — it never takes an
+attack token. It degrades by attrition while hostiles stand inside its 46m ring, which is what
+makes leaving it a real cost without granting anyone aggression the arc did not pay for.
+
+The ASSASSINATE mark went in as a SCREENED elite and came out as an ANCHOR, because the harness
+said so: with a frontal plate the mark was hard to *kill*, and the whole point is that it should be
+hard to *reach*. ANCHOR is the modifier whose description is literally "the formation orients on it
+— break the anchor or the arc never closes".
+
+All four stage, run and resolve; all 28 encounter configurations are now reachable and playable.
+
+---
+
+## 27. The content layer, completed
+
+```
+upgrades      30   BOOST 8 · VANISH 9 · LOCK 6 · STAGGER 7      (GDD §8.2, complete)
+evolutions    12   3 per hardpoint, the branch drawn by seed    (GDD §8.3, tier-1 complete)
+reactors       4   VECTOR · MIRRORWORK · NULLPOINT · BREAKER
+archetypes     8   + SPLITTER, HOOK
+bosses         4   SEVERANCE · GRAVEMARK · CHORUS · KILNWORKS
+sectors        2   EXTERIOR · MANUFACTURE
+```
+
+Every one of the eighteen new upgrades and eight new evolutions is exercised through the real
+simulation in `tools/v03.mjs` §A and §B, against **the exact value its card prints**. A sample of
+the rows, verbatim:
+
+```
+target-debt          baseline blade 620  ·  multiplier x1.40  ·  with debt 868  ·  ratio 1.40  ·  reset to 1.00
+impact-reflection    lance impact 190  ->  456 applied  (2.4x Exposed multiplier on top of the 100% share)
+shared-fault         windupSlow [1, 0.6, 0.6]  — the broken frame is unaffected, its neighbours are at 40% slower
+mine-lattice         6 mines · 9m trigger · 12.0s life · 0 bolts fired
+swarm-lock           14 launches
+anchor-driver        640 damage · pinned 2.18s
+breach-driver        plate destroyed · 900 damage
+lock-splitting-rifle 2 locks · 43 damage each, simultaneously
+```
+
+**Weapon evolution is now a seeded decision, not a fixed table.** Three branches exist per
+hardpoint and the FORGE draws which one a hardpoint offers, so an un-evolved hardpoint is a
+different card at a different FORGE of a different run. Six consecutive FORGE rolls produced
+eleven distinct branch offers.
+
+**SPLITTER** splits on stagger into two shards of 1,200 structure holding their own bearings — the
+arc widens as a direct consequence of your own success. Shards are terminal; a shard never splits
+again. **HOOK** fires a harpoon that moves *you* 30m toward it, through the only channel in the
+codebase by which a hostile may move the pilot.
+
+**BREAKER** is the slowest chassis in the roster (62 → 37) and the only one whose impact never
+decays. **NULLPOINT** takes the floor away: 0/sec on the ground, 48/sec airborne, and the pile
+driver cooldown halved because from up there the driver is the natural verb.
+
+---
+
+## 28. Five defects, in code that had already shipped
+
+None of these were found by reading. All five were found by an instrument that measured something
+and got an answer that could not be true — which is the argument for building the instrument
+before the content rather than after it.
+
+### Defect 1 — a new run inherited the previous run's encounter field
+
+`startRun` cleared hostiles, ordnance and effects, and did not clear `EncounterFields`. A shrinking
+field narrows `ctx.confine`, so a run begun after a CONTESTED GROUND encounter inherited a phantom
+ring centred on the **old** volume, and the frame was yanked back to it on its first simulated
+frame. Measured while chasing an unrelated probe failure:
+
+```
+skipToLabel put the frame at   z 9340   (the ARENA volume)
+one simulated frame later      z 657    (a phantom ring around a volume from the previous run)
+```
+
+This is a strong candidate for a contributing cause of §20's Defect 1 — the ladder harness
+"measuring empty arenas" for up to a fifth of its sample. A run staged into an arena the pilot is
+then teleported away from is exactly a run that never stages a fight.
+
+### Defect 2 — the FALL ladder's forward bias has been inert since v0.2
+
+`beginStop` called `director.resetEncounter()`, which correctly derives the forward bias from the
+active FALL tier and from FLANK DEBT — and then overwrote it with the baseline on the very next
+line. Every encounter in the game therefore ran at bias 0.18 regardless of tier, which means the
+ladder's tiers V–X have never run the bias they are specced with, and the FLANK DEBT downside has
+never cost the player anything at all.
+
+```
+before the fix   mean arc, FLANK DEBT held  125.4°   ·  clean  125.6°   ·  delta -0.2°
+```
+
+The single line is gone. §32 re-measures the ladder on code where the lever is live.
+
+### Defect 3 — BREAKER's headline rule was applied backwards
+
+The card reads *"Your impact never decays"* — the impact you **deal**, on the frames you deal it to.
+It was being set on the pilot's own impact bar, which made the chassis easier to stagger and did
+nothing whatsoever to the fight: a hidden downside, on a card that states its costs.
+
+### Defect 4 — an elite made its tier easier
+
+`ELITES.anchor` gave the rest of the formation a **cohesion** term: other hostiles biased their
+orbit *toward* the elite, tightening the formation around it. It reads well, and it does the
+opposite of what the card promises — *"the formation orients on it: break the anchor or the arc
+never closes."* Clustering a formation **narrows** the span it subtends from the pilot, which
+lowers the encirclement arc, which lowers the attack-token budget.
+
+So the elite that arrives at FALL VII specifically to make the tier harder was making it easier.
+Measured over six seeds on one composition, one scripted policy, elite granted by hand:
+
+```
+no elite     mean arc  92.8°
+ANCHOR       mean arc  86.7°     <- the formation is tighter, the arc is smaller, tokens are rarer
+VECTORED     mean arc  98.0°
+RELENTLESS   mean arc  94.1°
+```
+
+This is a strong candidate for the **VI → VII clear-rate inversion**, which appeared in v0.2
+(48% → 52%) and again in v0.3's first ladder run (20% → 24%) — the same adjacent pair, the same
+direction, across two independent measurements, at exactly the tier where elites are introduced.
+
+ANCHOR now feeds the same bearing-separation term FLANK DEBT uses: while it lives, the formation
+holds its bearings apart and the arc resists closing. Same card, same fiction, and now the same
+mechanic. Re-measured on the fixed code:
+
+```
+no elite     mean arc 100.3°
+ANCHOR       mean arc 106.6°     <- the arc is harder to close, which is what the card says
+```
+
+FLANK DEBT and ANCHOR are the same statement — *this formation resists being collapsed* — so they
+are one lever with two sources rather than two levers that happen to agree.
+
+### Defect 5 — lock state leaked across encounters through recycled ids
+
+The lock-hold tracker asked "is this the same lock as last frame?" by comparing hostile ids, and
+hostile ids restart at 1 on every encounter. So *the fourth frame of this fight* and *the fourth
+frame of the last one* were treated as one continuous lock: TARGET DEBT arrived pre-charged, and
+the line-of-sight grace window arrived pre-spent, which could drop a freshly acquired hard lock on
+its first frame. Identity cannot be recycled; an integer can. The tracker now holds the object.
+
+---
+
+### Two instrument defects, fixed in the same pass
+
+Neither is shipped code, but §20 established that an untrustworthy instrument is a defect in its
+own right.
+
+**`stageVariant` staged the wrong sector.** The dev hook took the first stop matching a state,
+anywhere in the run. A Sector 2 configuration requested while the run was in Sector 2 could
+therefore stage a **Sector 1** volume, and measure — and photograph — the wrong sector entirely.
+It now prefers a stop in the sector the run is currently in.
+
+**The ladder ran against a hot-reloading page.** Fifteen minutes of measurement pointed at the
+Vite dev server: a source edit during the window reloaded the page out from under it and the run
+died at tier 10 with *"Execution context was destroyed, most likely because of a navigation"* —
+nine tiers of work discarded, reported in the language of a browser problem rather than of its
+cause. Long measurements now build a bundle and serve it from `vite preview` (`tools/serve.mjs`),
+which has no HMR client and cannot navigate itself; the ladder also watches for a navigation and
+names it if one ever happens again.
+
+---
+
+## 29. Two design changes that measurement forced
+
+### CHORUS: bands are radial, bearings are angular
+
+The first implementation gave the three voices three distinct **bands** and assumed that produced
+three distinct **bearings**. It does not. A band is a radius and a bearing is an angle, and three
+frames at three radii sit on one bearing quite happily.
+
+```
+first implementation   mean span 72-105°   against a 180° gate
+                       the gate essentially never closed
+                       the two scripted policies separated by nothing:
+                         rotate  mean span 91.2°   open 56.7s   damage 14,085
+                         static  mean span 104.8°  open 48.5s   damage 31,989
+```
+
+Reporting that as a pass on "rotate beat static on one metric" would have been exactly the fake
+separation non-negotiable 9 exists to prevent. The voices now hold bearing **stations** 120° apart
+and own both steering axes — band radially, station angularly — with the tangential correction
+capped by each voice's own speed. That cap is the entire fight: BASSO holds a station at band
+132–190 and moves at 50, so holding a bearing out there means covering an enormous arc length, and
+a pilot on assault boost covers it faster.
+
+```
+after the correction   settled span 220°   (stations 0° / 120° / 240°)
+                         rotate  mean span 110.1°  open 43.3s  damage 34,031 of 34,000  — killed it
+                         static  mean span 179.5°  open 12.8s  damage  9,013            — did not
+```
+
+64° of mean span between the two policies, a 3.4x separation on time-with-the-pool-open, and a
+3.8x separation on damage. The fight is now the thing the design says it is.
+
+### FLANK DEBT: the patch's own lever does not reproduce its own claim
+
+v2.3 PATCH 4 raised FLANK DEBT's forward bias from 0.34 to 0.45 to escape the measured dead zone,
+and paired it with a spawn-spread step, with an acceptance bar of **+12° of mean encirclement arc**
+against the same composition. With Defect 2 fixed, both levers were verified *set* — and the arc
+still did not move:
+
+```
+forward bias measured   clean 0.16   FLANK DEBT 0.45
+spawn spread measured   clean 0.30   FLANK DEBT 0.60
+mean arc                clean 69.9°  FLANK DEBT 68.2°     delta  -1.6°   bar +12°
+```
+
+The reason is structural, and it generalises PATCH 3's finding rather than contradicting it.
+Forward bias is a spiral-in ratio on a normalised steering vector, and **the band clamp catches
+the spiral**: a hostile pulled inward stops at its band's inner edge and resumes orbiting. So the
+lever shapes the *approach* and leaves the steady-state bearing distribution — which is what the
+arc measures — essentially untouched. Spawn spread jitters arrivals around one Director-chosen
+bearing, so it does not distribute them either.
+
+The arc is `360° − largest bearing gap`. To widen it you have to widen **bearings**. FLANK DEBT
+therefore gains a third lever, `Director.bearingSeparation`: each non-attacking hostile pushes
+tangentially away from the nearest other hostile's *bearing*, capped by its own speed. It is
+positional pressure and nothing else — it cannot change how many tokens exist, what anything hits
+for, or how much structure anything has.
+
+```
+with bearing separation   clean 69.9°   FLANK DEBT 91.6°   delta +21.8°   bar +12°   PASS
+```
+
+**This is a correction to v2.3 PATCH 4 and should be folded into the GDD**: the acceptance bar was
+right and the lever named to reach it was wrong.
+
+---
+
+## 30. The narrative syntax probe
+
+Not the writing — the smallest test of the assumption underneath it: *combat is movement, story is
+stillness, and the FORGE is the only place the machine stops.* Forty scenes written against an
+untested premise is the most expensive mistake available in this phase.
+
+Fifteen lines: an opening comm (three, drawn by run count), five FORGE exchanges, four boss
+introductions, two sector-clear lines, and one PROTOTYPE line written now because v0.5's illicit
+FORGE beat has to exist before its presentation can be built around it.
+
+Five rules the implementation enforces, so that scaling it later is transcription rather than
+redesign:
+
+1. **Never during combat.** A line may only be issued at a FORGE, a boss introduction, or a sector
+   boundary. Nothing here can fire while the pilot is being shot at.
+2. **Two lines maximum.** The third is clipped by CSS, not by discipline.
+3. **The voice degrades with depth**, at render time rather than in the writing, so one authored
+   line reads correctly at every sector. Deterministic per line and per sector: the same words
+   break in the same places every time, so it reads as a damaged channel and not as noise.
+4. **It advances across runs, not within one.** Unseen lines are preferred over seen ones.
+5. **It never explains a mechanic.** The HUD does that; the onboarding owns teaching.
+
+The FORGE line is drawn as the machine *settles*, not when the cards assemble — choreographically
+that is when the stillness starts, and practically it makes the beat a fact about the run rather
+than something contingent on a wall-clock animation phase.
+
+**This is the item the playtest gate is really about.** The harness can prove a line is issued in
+the right place and never in the wrong one. It cannot tell you whether it lands or intrudes.
+
+---
+
+## 31. v0.3 gate results
+
+`node tools/v03.mjs` — twelve sections, sixty-eight rows.
+
+| § | Section | Rows | Result |
+|---|---|---|---|
+| A | the eighteen new upgrades, against their printed values | 18 | **18 PASS** |
+| B | the eight new weapon evolutions, and the seeded branch draw | 9 | **9 PASS** |
+| C | NULLPOINT and BREAKER, and the two rules that define them | 6 | **6 PASS** |
+| D | SPLITTER splits · shards are terminal · HOOK moves the pilot | 4 | **4 PASS** |
+| E | OBJECTIVE — four configurations staged, run and resolved | 5 | **5 PASS** |
+| F | CHORUS — the harmony gate, and policy separation | 3 | **3 PASS** |
+| G | KILNWORKS — the feed gate, the travelling line, class distinction | 8 | **8 PASS** |
+| H | Sector 2 in more than palette | 4 | **4 PASS** |
+| I | two-sector lifecycle: residency, run state, stream cursors | 3 | **3 PASS** |
+| J | FLANK DEBT acceptance, +12° bar | 1 | **1 PASS** |
+| K | the narrative probe issues in the right places | 4 | **4 PASS** |
+| L | the sovereign arc and non-negotiable 7, against the new content | 3 | **3 PASS** |
+| | | **68** | **68 PASS · 0 FAIL · 0 BLOCKED** |
+
+### Non-negotiable 7, re-proved against the new roster — including the corrected ANCHOR
+
+ANCHOR's replacement lever is a STEERING term. It moves where a frame stands and nothing else:
+no structure, no damage, no arc threshold, no token. The proof below is unchanged by it.
+
+
+```
+                 FALL I   FALL X
+lancer            3400     3400
+splitter          3000     3000
+hook              3600     3600
+warden            7800     7800
+player            9000     9000     (identical at all ten tiers)
+damage levers     []
+structure levers  []
+```
+
+### Prior gates, re-run after every change in this phase
+
+```
+loop         SAME PROCEDURAL SETUP true · SAME EXECUTION TRACE true · STREAM STATES EQUAL true
+pilot        ARENA · DUEL · STORM · HUNT · PURSUIT · SEVERANCE — all cleared
+lifecycle    MAX RESIDENT SECTORS 2 PASS, across three DIFFERENT sectors this time
+fallcheck    arc thresholds identical · structure identical · damage levers [] · structure levers []
+variants     28/28 reachable and playable
+gravemark    chaser 0/6 · rotator 6/6
+onboarding   CHECKPOINT F PASS · token story 1 → 2 → 1 intact
+settings     10 assist rows · 11 bind rows · assists reach RunState
+continuity   world builds 1 · worst frame at a crossing 190.9ms
+content      every v0.1 and v0.2 upgrade, evolution and reactor still exact
+```
+
+Nothing an earlier gate proved was broken.
+
+---

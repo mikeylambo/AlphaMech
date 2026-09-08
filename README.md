@@ -2,8 +2,8 @@
 
 **A high-speed mech action roguelite about becoming impossible to surround.**
 
-Sector 01 · EXTERIOR · **v0.2 — the Ceiling Pass**. TypeScript + Three.js + Vite. No authored
-meshes, no asset downloads, no `Math.random()` in the simulation.
+Sector 01 EXTERIOR → Sector 02 MANUFACTURE · **v0.3 — Sector 2**. TypeScript + Three.js + Vite.
+No authored meshes, no asset downloads, no `Math.random()` in the simulation.
 
 ```sh
 npm install
@@ -13,6 +13,7 @@ npm run dev        # http://localhost:5180
 `npm run build` type-checks and bundles. `npm run verify` type-checks only.
 `npm run profile` builds, serves and measures the frame budget on this machine — run it with
 `-- --headful` on the hardware you actually ship to.
+`npm run gates` runs the whole verification suite against a dev server (see **Verification**).
 
 ---
 
@@ -118,25 +119,61 @@ timing, but now *it* is the aggressor.
 ## Run structure
 
 ```
+RUN    = SECTOR 01 EXTERIOR → SECTOR 02 MANUFACTURE
 SECTOR = CHAIN A → FORGE → CHAIN B → FORGE → BOSS → RESULTS
 CHAIN  = 2–3 encounter states + connective tissue
 ```
 
-A sector is generated incrementally under a per-frame millisecond budget while you play the one
-before it, and the one behind you is retired when you leave it. **Never more than two sectors are
-resident**, and everything that defines the run — pilot model, build, evolutions, score, and all
-seven RNG cursors — crosses the boundary untouched.
+A sector is generated incrementally while you play the one before it, and the one behind you is
+retired when you leave it. **Never more than two sectors are resident**, and everything that
+defines the run — pilot model, build, evolutions, score, and all seven RNG cursors — crosses the
+boundary untouched. The light and the score's palette cross-fade at the boundary rather than cut.
 
-Each of the six encounter states has **four variants** — twenty-four in all — that change the
-geometry, the objective and the failure condition without ever touching the arc rule.
+Each encounter state has **four configurations** — twenty-eight in all — that change the geometry,
+the objective and the failure condition without ever touching the arc rule.
 
-The boss is chosen by the seed: **SEVERANCE**, the duellist, or **GRAVEMARK**, a commander that
-cannot be damaged while two of its four RELAY escorts hold its rear arc. Chasing the escorts
-loses; rotating the commander's rear arc out from under them wins.
+**Each sector offers two bosses of two different classes**, so the exam changes with the seed
+rather than only the model.
 
-**Sector 1 chain pool:** OPENING GAMBIT · INTERCEPT · PRESSURE COOKER · LONG WAY DOWN α.
-The seed plays two, obeying Chain Law 2 (a chain's dominant stress must differ from the
-previous chain's).
+| Sector | Boss | Class | Damage gate |
+|---|---|---|---|
+| 01 | SEVERANCE | ACE | none — the whole fight is the read |
+| 01 | GRAVEMARK | FORMATION | two RELAYs holding **its** rear arc |
+| 02 | CHORUS | FORMATION | the span its three voices subtend from **you** |
+| 02 | KILNWORKS | WAR MACHINE | four feed arms, then the pour head's frontal armour |
+
+CHORUS is Law II stated as literally as the game can state it. Its three voices hold bearing
+stations 120° apart, and while the arc they subtend *from where you are* is 180° or more the
+shared 34,000 pool refuses damage outright. Turning cannot change that number — the arc is
+rotation-invariant. Only moving can. Left alone the trio subtends ~240°, which is above the gate
+**and** above the 235° token line, so standing still costs you both the damage and a second
+attack token.
+
+KILNWORKS is the opposite exam: the boss is a casting line that travels for the entire fight, so
+no position is holdable and rotation has to be continuous.
+
+**Chain pools.** Sector 1 plays four authored chains. Sector 2 plays eleven — seven standard, two
+rare, one reactor-specific (ANVIL SHIFT, BREAKER only) and one secret (THE CLEAN LINE, reached on
+an untouched structure bar). The seed plays two, obeying Chain Law 2.
+
+---
+
+## Sector 2 — MANUFACTURE
+
+The descent is supposed to mean something, so Sector 2 is not Sector 1 with different fog.
+
+- **The look inverts.** No sun disc, a near-black zenith, and the warm bloom coming from *below*
+  the horizon, because the brightest thing in a foundry is the floor.
+- **The geometry changes kind.** Cooling stacks just outside the play space that read as
+  enclosure, a casting channel across the floor, and a roof above the altitude cap.
+- **The machines alter the environment.** Conveyor bands carry the pilot **and every hostile
+  standing on them** at 17 m/s. Holding a bearing costs continuous thrust — positional pressure
+  with no damage value, no structure value and no arc threshold anywhere near it.
+- **The roster widens.** SPLITTER, which splits into two bearings when you stagger it, and HOOK,
+  the only frame in the game that moves *you*.
+- **OBJECTIVE arrives** — the first place in the descent with something worth holding.
+- **A second palette for the score**: the same generative music, down a fourth, narrower and
+  harder, at 96 bpm instead of 108.
 
 ---
 
@@ -147,8 +184,10 @@ src/
   core/       RNG (per-domain streams) · Tuning · Input · Settings · MathUtil · Textures · Pool
   frame/      Vitals · Vanish (in Player) · Rally · Lock · CameraRig · Ordnance · Player
   director/   Director · PilotModel · Encounters · Chains · Fall · Variants
-              EncounterFields · Transports · Onboarding
-  enemies/    Archetypes · Enemy · Severance · Gravemark · Elites
+              EncounterFields · Transports · Objectives · Onboarding
+  enemies/    Archetypes · Enemy · Elites · Boss
+              Severance · Gravemark · Chorus · Kilnworks
+  narrative/  Comms
   build/      Reactors · Upgrades · Corrupted · Weapons · Disciplines · RunState
   world/      Kit · ChainWorld · Sector
   score/      Metrics
@@ -186,15 +225,60 @@ seed.
 | `__dev.lifecycle()` | Resident sector count, geometry residency, and everything carried across a boundary |
 | `__dev.profileSample()` · `simCost()` | Frame percentiles, draws, tris, programs, GPU memory · isolated CPU cost |
 | `__dev.onboarding()` | The orientation's beat and the token count the player was shown at each one |
+| `__dev.stageVariant(id)` | Stage a named configuration **and begin it**, returning the composition staged |
+| `__dev.stageBoss(kind)` | Descend to the boss's sector and start the fight |
+| `__dev.gotoSector(n)` | Cross to a sector without playing the ones before it |
+| `__dev.conveyors()` · `lineOfSight()` · `comms()` · `chainCensus()` | Sector 2's systems, live |
 
-Scripted verification lives in `tools/`. See `BUILD_REPORT.md` §8.
+---
+
+## Verification
+
+Scripted verification lives in `tools/`, and every gate writes its evidence to `.artifacts/`.
+Start a dev server first, then:
+
+| Tool | What it proves |
+|---|---|
+| `node tools/v03.mjs` | **v0.3's 68 rows** — every new upgrade, evolution, reactor, archetype, objective, boss, and the sovereign arc against all of it |
+| `node tools/ladder.mjs` | The FALL ladder, 50 seeded runs per tier, with the separation gate |
+| `node tools/content.mjs` | Every v0.1/v0.2 card still matching the value it prints |
+| `node tools/variants.mjs` | All 28 encounter configurations reachable and playable |
+| `node tools/loop.mjs` | Determinism: same seed, same setup, same trace, same stream states |
+| `node tools/lifecycle.mjs` | Residency never exceeds two, across different sectors |
+| `node tools/gravemark.mjs` · `pilot.mjs` · `onboarding.mjs` · `fallcheck.mjs` · `settings.mjs` | The v0.1 and v0.2 gates |
+
+Every row prints the measurement it was decided on, not just a verdict. A row that passes for the
+wrong reason is visible in its own evidence — which is how four defects in shipped code were
+found during v0.3 (`BUILD_REPORT.md` §28).
 
 ---
 
 ## Documents
 
-- `blinkfall-gdd-v2.2.1.md` — the design document. The destination.
+Read in this order. **Precedence: v2.3 patch > v2.2.1 GDD > RC brief > existing implementation.**
+
+- `blinkfall-gdd-v2.2.1.md` — the design specification. What the game *is*.
+- `blinkfall-gdd-v2.3-patch.md` — four measurement-forced corrections, applied on top. **Takes
+  precedence over v2.2.1 wherever they conflict.** The important one: the encirclement arc is
+  `360° − largest bearing gap`, which makes it rotation-invariant. Law II is a positioning
+  problem, not a facing problem.
+- `blinkfall-1.0-rc-brief.md` — the production plan. What still has to be built, and in what order.
 - `TONIGHT_BUILD_BRIEF.md` — the Alpha Run scope.
-- v0.2 — the Ceiling Pass: hardware budget, accessibility, sector lifecycle, the FALL ladder,
-  24 variants, GRAVEMARK, and the first 100 seconds.
-- `BUILD_REPORT.md` — donor decisions, assumptions, checkpoint results, scope table.
+- `BUILD_REPORT.md` — donor decisions, assumptions, every checkpoint result, and the defects each
+  phase's instruments found. v0.3 begins at §23.
+
+### Where the project is
+
+Shipped: **v0.1 Alpha**, **v0.2 Ceiling Pass**, **v0.3 Sector 2**.
+
+Next: **v0.4 — Sector 3** (ANVIL PRIME, COLDIRON, COLOSSUS, JAMMER, DRAGOON, CONTRAIL, REDLINE,
+upgrades to 42). Scope and gates in §5 of the RC brief.
+
+Two things still block progress and neither is code:
+
+- **The GPU half of the profiling budget.** `npm run profile -- --headful` on real hardware. This
+  container has no GPU, so every render figure so far is a SwiftShader floor.
+- **Human playtest.** Every gate cleared so far was cleared by scripted pilots, and those measure
+  solvability and separation — not whether it is enjoyable. v0.3's own gate asks two questions no
+  harness can answer: *is Sector 2 distinguishable in more than palette*, and *does dialogue at
+  the FORGE land or intrude?*

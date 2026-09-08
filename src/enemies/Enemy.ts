@@ -391,17 +391,19 @@ export class Enemy implements Hostile {
       // The forward bias is what turns orbiting into encirclement pressure. FLANK DEBT and the
       // FALL ladder both raise it; neither can touch how many tokens exist.
       wish.addScaledVector(d, this.ctx.director.forwardBias);
-      // FLANK DEBT: push apart in BEARING, so the formation occupies a wider span around the
-      // pilot. Tangential only — this moves where a frame stands, never what it is allowed to do.
-      const sep = this.ctx.director.bearingSeparation;
+      /**
+       * Push apart in BEARING, so the formation occupies a wider span around the pilot.
+       * Tangential only — this moves where a frame stands, never what it is allowed to do.
+       *
+       * Two sources feed it and the stronger wins: FLANK DEBT, which the player took on
+       * deliberately, and an ANCHOR elite, whose whole card is "break the anchor or the arc never
+       * closes". Both are the same statement — this formation resists being collapsed — so they
+       * are the same lever rather than two that happen to point the same way.
+       */
+      let sep = this.ctx.director.bearingSeparation;
+      const anchor = this.ctx.hostiles.find((h) => h !== this && h.alive && ((h as Enemy).elite?.separation ?? 0) > 0);
+      if (anchor) sep = Math.max(sep, (anchor as Enemy).elite!.separation);
       if (sep > 0) wish.addScaledVector(this.bearingPush(d), sep);
-      // ANCHOR elites pull the rest of the formation onto themselves, so the arc will not close
-      // until the anchor is dealt with.
-      const anchor = this.ctx.hostiles.find((h) => h !== this && h.alive && (h as Enemy).elite?.cohesion);
-      if (anchor) {
-        const toAnchor = anchor.pos.clone().sub(this.pos).setY(0);
-        if (toAnchor.lengthSq() > 1) wish.addScaledVector(toAnchor.normalize(), (anchor as Enemy).elite!.cohesion);
-      }
     }
 
     // ANCHOR DRIVER: pinned means pinned. The frame still swings, it just cannot leave.

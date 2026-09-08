@@ -1,5 +1,6 @@
 import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
 import fs from 'node:fs';
+import { servePreview } from './serve.mjs';
 
 /**
  * Harness output lives in the repository, not in a session-scoped scratch directory.
@@ -18,10 +19,18 @@ const TIERS = (process.env.TIERS ?? '1,2,3,4,5,6,7,8,9,10').split(',').map(Numbe
 const LEVER = process.env.LEVER ? (([k, v]) => [k, v === 'true' ? true : v === 'false' ? false : Number(v)])(process.env.LEVER.split(':')) : null;
 const OUT = process.env.OUT ?? ART('ladder.json');
 
+// A fifteen-minute measurement runs against a BUILT bundle, not the dev server: a source edit
+// mid-run hot-reloads the page and destroys the execution context, taking nine tiers with it.
+const { url: PAGE, stop: stopServer } = await servePreview();
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--use-gl=swiftshader','--enable-unsafe-swiftshader','--no-sandbox','--disable-dev-shm-usage'] });
 const page = await browser.newPage({ viewport: { width: 640, height: 400 } });
 const errs = []; page.on('pageerror', (e) => errs.push(e.message));
-await page.goto('http://localhost:5180/', { waitUntil: 'networkidle' });
+// If the page ever navigates under a run, say so in the language of the cause rather than
+// letting Playwright report a destroyed execution context.
+let navigated = false;
+page.on('framenavigated', (f) => { if (f === page.mainFrame()) navigated = true; });
+await page.goto(PAGE, { waitUntil: 'networkidle' });
+navigated = false;
 await page.waitForTimeout(1500);
 // The page boots on a random seed, so the title backdrop and the run started by DEPLOY differ
 // on every launch — and the state they leave behind is what the first measured runs inherit.
@@ -166,7 +175,13 @@ const seeds = Array.from({ length: RUNS }, (_, i) => `L${String(i).padStart(3, '
 const table = [];
 for (const tier of TIERS) {
   const t0 = Date.now();
-  let rows = await page.evaluate(([src, tier, seeds, cap, lever]) => eval(src)(tier, seeds, cap, lever), [HARNESS, tier, seeds, CAP, LEVER]);
+  let rows;
+  try {
+    rows = await page.evaluate(([src, tier, seeds, cap, lever]) => eval(src)(tier, seeds, cap, lever), [HARNESS, tier, seeds, CAP, LEVER]);
+  } catch (e) {
+    if (navigated) throw new Error(`the page navigated during tier ${tier}. The measurement was running against a server that reloaded it — re-run against a built preview (the default) and do not edit source during a ladder run.`);
+    throw e;
+  }
   const voids = rows.filter(r => r.outcome === 'void').length;
   if (voids) console.error(`  tier ${tier}: ${voids} run(s) never staged a fight and were discarded`);
   rows = rows.filter(r => r.outcome !== 'void');
@@ -217,3 +232,4 @@ console.log(`RUNS                         : ${RUNS} per tier × ${TIERS.length} 
 console.log('ERRORS                       :', errs.length ? errs.slice(0, 4).join('\n') : 'clean');
 fs.writeFileSync(OUT, JSON.stringify({ runs: RUNS, cap: CAP, table, pairs, monotonic }, null, 1));
 await browser.close();
+stopServer();
