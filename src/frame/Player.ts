@@ -483,16 +483,19 @@ export class Player implements PressureTarget {
     if (!h.alive) return;
     const scale = this.damageScale() * this.targetScale(h);
     const wasStaggered = h.vitals.staggered;
+    // read lock membership BEFORE the hit: a killed hostile drops out of `lock.all` immediately,
+    // which would make CHAIN READ silently never fire
+    const wasLocked = this.lock.targets.includes(h);
     h.applyHit(damage * scale, impact * scale, source);
     // Landing damage on a target you broke is the conversion the score is asking about.
     if (wasStaggered && source !== 'upgrade') this.events.onConversion(h);
-    if (!h.alive) this.onKill(h, source);
+    if (!h.alive) this.onKill(h, source, wasLocked);
   }
 
-  onKill(h: Hostile, source: DamageSource) {
+  onKill(h: Hostile, source: DamageSource, wasLocked = this.lock.targets.includes(h)) {
     this.events.onHostileKilled(h, source);
     // CHAIN READ: killing a locked hostile locks the nearest within 220m and grants 1.0s bullet time.
-    if (this.mods.chainRead && this.lock.all.includes(h)) {
+    if (this.mods.chainRead && wasLocked) {
       const next = this.lock.chainTo(this.ctx.hostiles.filter((x) => x !== h), this.pos, UPGRADE_VALUES.chainReadRange);
       if (next) {
         this.events.enterSlow(0.28, UPGRADE_VALUES.chainReadSlow);

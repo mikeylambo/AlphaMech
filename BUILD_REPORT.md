@@ -287,6 +287,38 @@ claimed as measured.
 
 ---
 
+## 6b. Content verification — every value, measured
+
+`tools/content.mjs` drives each reactor, upgrade and evolution through the real simulation and
+reads back what actually happened. Measured against the GDD:
+
+| Item | GDD | Measured |
+|---|---|---|
+| VECTOR | 9,000 structure · 18 EN vanish · no clone | `structure 9000 · vanishCost 18 · clone 0` |
+| MIRRORWORK | 7,200 · 12 EN · 2.0s clone | `structure 7200 · vanishCost 12 · clone 2 · clonesAfterVanish 1 · enSpent 12` |
+| Zero-Point Reactor | ground 43 → 0, air 16 → 129 | `ground 0 · air 129` |
+| Rail Core | +0% at 62 → +100% at 200 | 100 damage at rest → `200` at velocity 200 |
+| Slipstream | within 8m above 120 velocity → stack, max 3 | first stack acquired at `speed 126`, `max 3` |
+| Mirror Chassis | 4.0s clone firing at 60% | `clones 1 · life 4.0 · damageScale 0.6` |
+| Vanish Battery | −18 EN → +30 EN | `50 EN before → 80 EN after` |
+| Predator Read | telegraph +0.4s early, window 0.30 → 0.22 | `window 0.22 · lead 0.4` (reaching the enemy through `ctx.telegraphLead`) |
+| Split Lock | hold 2 locks | `capacity 2 · held 2` |
+| Weight of Attention | locked +35% | `locked 135 · unlocked 100` |
+| Chain Read | lock nearest within 220m + 1.0s bullet time | victim `#5` killed → lock chains to `#6` |
+| Execution Protocol | blade vs staggered +200% | `3,534` damage = 620 × 3 × 1.9 stagger multiplier |
+| Cascade Break | 40% of target's Impact Max to every other hostile | `248` = 40% of 620, applied to both others |
+| Reactor Bleed | 40 EN core, 8.0s | `cores 1 · energy 40 · life 8` |
+| Tether Blade | 15m tether pulls you in at 90 m/s | `120m → 71m` in 0.5s |
+| Momentum Railgun | 0.55s charge · 380 dmg · cannot fire below 90 velocity | `chargeAtRest 0 · readyAtRest false · fired at 200 velocity for 380` |
+| Orbiting Interceptors | 4 orbit, destroy incoming within 25m | `live 4 · max 4`; hostile VOLLEY/MORTAR/STRAFE fire travels and is intercepted |
+| Seismic Driver | landing shockwave 320/260 r28 **in addition to** the direct hit | direct `900`, plus `320` to each of two hostiles in radius |
+
+**One bug found and fixed by this pass:** CHAIN READ never fired, because a killed hostile drops
+out of `lock.all` before `onKill` runs, so the "was this target locked?" test always failed.
+Lock membership is now read before the hit lands.
+
+---
+
 ## 7. Notes on performance work
 
 Three changes were made after profiling, all recorded above as assumptions 11–12:
@@ -317,6 +349,8 @@ programs · 5 tracked entities**.
 | `tools/continuity.mjs` | One world build per run; volume crossings generate no geometry (Checkpoint D) |
 | `tools/forge2.mjs` | FORGE 1 offers 4 evolutions, FORGE 2 offers 3; classifier coverage across the pool |
 | `tools/dps.mjs` | Hardpoint values match the GDD at the millisecond level |
+| `tools/content.mjs` | Every reactor, upgrade and weapon evolution measured against its GDD values (§6b) |
+| `tools/gallery.mjs` | Framed captures of every encounter state and the FORGE |
 | `tools/shot.mjs` | Framed screenshots of any encounter state |
 
 Run them with the dev server up:
