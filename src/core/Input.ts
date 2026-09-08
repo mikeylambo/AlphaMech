@@ -87,8 +87,12 @@ export class InputManager {
       if (this.onRallyDir) for (const d of RALLY_DIRS) if (next[d] && !this.keys[d]) this.onRallyDir(d);
       this.keys = next;
       this.mouseButtons = (next['MOUSE1'] ? 1 : 0) | (next['MOUSE2'] ? 2 : 0);
-      this.lookX += this.scripted.look[0];
-      this.lookY += this.scripted.look[1];
+      // ASSIGN, never accumulate. Adding to lookX folds in whatever the real mouse contributed
+      // before the harness took over, which makes the first scripted frame depend on how many
+      // real frames happened to run first — and a measurement instrument that depends on
+      // machine load is not an instrument. Scripted input is the whole input, exactly.
+      this.lookX = this.scripted.look[0];
+      this.lookY = this.scripted.look[1];
       this.moveX = clamp((next['D'] ? 1 : 0) - (next['A'] ? 1 : 0), -1, 1);
       this.moveZ = clamp((next['W'] ? 1 : 0) - (next['S'] ? 1 : 0), -1, 1);
       this.padNow = [];

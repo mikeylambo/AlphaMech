@@ -40,7 +40,7 @@ import { buildLighting, SECTOR_LOOKS, SectorLighting } from './world/Sector';
 import { RunState } from './build/RunState';
 import { ReactorId, REACTORS } from './build/Reactors';
 import { UpgradeId } from './build/Upgrades';
-import { FALL_TIERS, fallProgress, tierFor, fallLadderProof } from './director/Fall';
+import { FALL_TIERS, FallTier, fallProgress, tierFor, fallLadderProof } from './director/Fall';
 import { pickElite, ELITES } from './enemies/Elites';
 import { EvolutionId, HardpointId } from './build/Weapons';
 
@@ -1305,6 +1305,11 @@ export class Game {
         const z = v.z0 + Math.min(160, (v.z1 - v.z0) * 0.25);
         this.player.pos.set(0, this.world.groundAt(0, z), z);
         this.player.vel.set(0, 0, 0);
+        // A teleport must land the frame in the same state an encounter entry would, or the
+        // locomotion left over from wherever it came from (speed, boost charge, grounded) makes
+        // the first seconds of the measured fight depend on what happened before it.
+        this.player.resetForEncounter(false);
+        this.director.resetEncounter(this.run.sector);
         this.mode = 'run';
         return { label, z, y: this.player.pos.y };
       },
@@ -1341,6 +1346,18 @@ export class Game {
       unlockAllFalls: () => { fallProgress.unlockAll(); return fallProgress.unlocked; },
       setFall: (n: number) => { this.run.fall = Math.max(1, Math.min(FALL_TIERS.length, n)); this.director.setFall(tierFor(this.run.fall)); return this.director.fall; },
       fall: () => ({ tier: this.director.fall, flankDebt: this.director.flankDebt, forwardBias: this.director.forwardBias, tokenCooldown: this.director.tokenCooldownSeconds }),
+      /**
+       * Override one lever on the active tier, for attribution work: when a step in the ladder
+       * costs more clear rate than its neighbours, this isolates which lever bought it. The
+       * override lives on a copy, so the shipped table is never mutated.
+       */
+      setFallLever: (key: string, value: number | boolean) => {
+        const t = { ...this.director.fall } as unknown as Record<string, number | boolean>;
+        if (!(key in t)) return 'no such lever: ' + key;
+        t[key] = value;
+        this.director.setFall(t as unknown as FallTier);
+        return this.director.fall;
+      },
       elites: () => this.hostiles.filter((h) => h.isElite).map((h) => ({ id: h.id, archetype: h.archetype, elite: h.elite?.name })),
       variants: () => VARIANTS.map((v) => ({ id: v.id, state: v.state, name: v.name, geometry: v.geometry, objective: v.objective })),
       variantsByState: () => Object.fromEntries(Object.entries(VARIANTS_BY_STATE).map(([k, v]) => [k, v.map((x) => x.id)])),

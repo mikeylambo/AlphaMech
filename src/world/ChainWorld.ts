@@ -580,8 +580,18 @@ export class SectorWorld {
   /** How many sectors have been generated this session — the lifecycle's headline counter. */
   buildCount = 0;
   retiredCount = 0;
-  /** Milliseconds per frame the incremental builder may spend. */
-  budgetMs = 3.5;
+  /**
+   * Volumes the incremental builder may complete per frame.
+   *
+   * This used to be a wall-clock millisecond budget, which quietly made the world
+   * NON-DETERMINISTIC: how much of the next sector existed on a given frame depended on how
+   * fast the machine was that frame, and `confine` clamps against the first and last resident
+   * volume, so a busy machine produced a different fight. A fixed step count restores
+   * determinism and is strictly cheaper: one volume is well inside the 6ms build slice the
+   * hardware profile allows, and a ~16-volume sector still finishes in about a quarter of a
+   * second — hundreds of times faster than the sector of play it is built during.
+   */
+  stepsPerPump = 1;
 
   constructor(private scene: THREE.Scene) {}
 
@@ -632,8 +642,7 @@ export class SectorWorld {
   /** Spend the frame budget on the queued sector. Called once per frame from the game loop. */
   pump(): void {
     if (!this.pending) return;
-    const t0 = performance.now();
-    while (performance.now() - t0 < this.budgetMs) {
+    for (let i = 0; i < this.stepsPerPump; i++) {
       const r = this.pending.steps.next();
       if (r.done) {
         this.sectors.push(this.pending.sector);

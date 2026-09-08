@@ -4,6 +4,8 @@ import fs from 'node:fs';
 const RUNS = Number(process.env.RUNS ?? 50);
 const CAP = Number(process.env.CAP ?? 100);          // seconds of simulation per run
 const TIERS = (process.env.TIERS ?? '1,2,3,4,5,6,7,8,9,10').split(',').map(Number);
+// LEVER=corruptedFraction:0 pins one lever across every tier, to attribute a step's cost
+const LEVER = process.env.LEVER ? (([k, v]) => [k, v === 'true' ? true : v === 'false' ? false : Number(v)])(process.env.LEVER.split(':')) : null;
 const OUT = process.env.OUT ?? '/tmp/claude-0/-home-user-AlphaMech/de688b13-e066-5ee1-9c87-f4592d5dd068/scratchpad/ladder.json';
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome', args: ['--use-gl=swiftshader','--enable-unsafe-swiftshader','--no-sandbox','--disable-dev-shm-usage'] });
@@ -11,6 +13,10 @@ const page = await browser.newPage({ viewport: { width: 640, height: 400 } });
 const errs = []; page.on('pageerror', (e) => errs.push(e.message));
 await page.goto('http://localhost:5180/', { waitUntil: 'networkidle' });
 await page.waitForTimeout(1500);
+// The page boots on a random seed, so the title backdrop and the run started by DEPLOY differ
+// on every launch — and the state they leave behind is what the first measured runs inherit.
+// Pin it, so the instrument starts from the same place every time it is invoked.
+await page.evaluate(() => { window.__game.pendingSeed = 'LADDER-BOOT'; });
 await page.click('#btnDeploy');
 await page.waitForTimeout(800);
 
@@ -35,12 +41,26 @@ await page.waitForTimeout(800);
  * policy is byte-identical at every tier and seeded per run, so rows are comparable and
  * reproducible.
  */
-const HARNESS = `(tier, seeds, capSeconds) => {
+const HARNESS = `(tier, seeds, capSeconds, lever) => {
   const g = window.__game;
   g.renderEnabled = false; g.uiEnabled = false;
   const out = [];
   const mulberry = (a) => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
   const hash = (str) => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; };
+
+  // WARM-UP, DISCARDED.
+  //
+  // A run that follows the title screen is not identical to the same run following another run,
+  // and how many real frames elapse between the page loading and this harness taking over
+  // depends on machine load. Measured: two invocations of this file, no code change between
+  // them, disagreed on FALL I by 1.5 degrees of mean arc and 118 structure. Burning one run
+  // first puts every measured run in the same position — after a run — which makes the
+  // instrument reproducible across invocations. Verified: back-to-back invocations now agree
+  // to the last digit.
+  g.startRun('WARMUP', 'vector', 1);
+  window.__dev.skipToLabel('ARENA');
+  for (let i = 0; i < 600; i++) { g.input.scripted = { down: ['W'], look: [0, 0] }; g.tick(1/60); }
+  g.input.scripted = null;
 
   const REACTION = 0.22;        // seconds before a seen windup can be answered
   const PERIPHERAL_SEE = 0.20;  // chance of noticing a windup that opens outside the front arc
@@ -48,10 +68,18 @@ const HARNESS = `(tier, seeds, capSeconds) => {
 
   for (const seed of seeds) {
     g.startRun(seed, 'vector', tier);
+    // attribution mode: hold one lever at a fixed value so a step's cost can be assigned
+    if (lever) window.__dev.setFallLever(lever[0], lever[1]);
     window.__dev.skipToLabel('ARENA');
-    g.tick(1/60);
+    // The encounter stages its first wave on a later frame than the teleport, so measuring
+    // immediately can record a run in an EMPTY arena. Settle until the fight actually exists;
+    // a run that never produces one is discarded rather than counted as an easy clear.
+    let settle = 0;
+    while (g.hostiles.length === 0 && settle < 240) { g.input.scripted = { down: [], look: [0, 0] }; g.tick(1/60); settle++; }
+    g.input.scripted = null;
     const rnd = mulberry(hash(seed + ':' + tier));
     const startHostiles = g.hostiles.length;
+    if (!startHostiles) { out.push({ seed, outcome: 'void', seconds: 0, meanArc: 0, meanTokens: 0, pvOpportunitiesPerMin: 0, structureLeft: 0, startHostiles: 0 }); continue; }
     let strafe = 1, strafeT = 0, missileT = 0;
     let ticks = 0, arcSum = 0, tokenSum = 0;
     let tracked = null, seenFor = 0;
@@ -128,7 +156,10 @@ const seeds = Array.from({ length: RUNS }, (_, i) => `L${String(i).padStart(3, '
 const table = [];
 for (const tier of TIERS) {
   const t0 = Date.now();
-  const rows = await page.evaluate(([src, tier, seeds, cap]) => eval(src)(tier, seeds, cap), [HARNESS, tier, seeds, CAP]);
+  let rows = await page.evaluate(([src, tier, seeds, cap, lever]) => eval(src)(tier, seeds, cap, lever), [HARNESS, tier, seeds, CAP, LEVER]);
+  const voids = rows.filter(r => r.outcome === 'void').length;
+  if (voids) console.error(`  tier ${tier}: ${voids} run(s) never staged a fight and were discarded`);
+  rows = rows.filter(r => r.outcome !== 'void');
   const clears = rows.filter(r => r.outcome === 'clear');
   const deaths = rows.filter(r => r.outcome === 'death');
   const mean = (a, f) => (a.length ? a.reduce((s, x) => s + f(x), 0) / a.length : 0);
